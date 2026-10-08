@@ -34,6 +34,9 @@ internal sealed class UsageForm : Form
     private readonly Label secondaryReset = new();
     private readonly Label status = new();
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 180_000 };
+    private readonly NotifyIcon tray = new() { Icon = SystemIcons.Application, Text = "Codex 사용량", Visible = true };
+    private readonly WidgetSettings settings = LoadSettings();
+    private static readonly string SettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageWidget", "settings.json");
     private bool refreshing;
 
     public UsageForm()
@@ -42,15 +45,27 @@ internal sealed class UsageForm : Form
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         TopMost = true;
-        ShowInTaskbar = true;
+        ShowInTaskbar = false;
         ClientSize = new Size(252, 158);
         BackColor = Background;
         ForeColor = TextColor;
         BuildUi();
-        MoveToCorner();
+        BuildTrayMenu();
+        Opacity = Math.Clamp(settings.Opacity, 0.45, 1);
+        RestorePosition();
+        ResizeEnd += (_, _) => SavePosition();
+        SystemEvents.DisplaySettingsChanged += DisplaySettingsChanged;
         timer.Tick += async (_, _) => await RefreshUsageAsync();
         Shown += async (_, _) => await RefreshUsageAsync();
-        FormClosed += (_, _) => timer.Stop();
+        FormClosed += (_, _) =>
+        {
+            timer.Stop();
+            timer.Dispose();
+            SystemEvents.DisplaySettingsChanged -= DisplaySettingsChanged;
+            tray.Visible = false;
+            tray.ContextMenuStrip?.Dispose();
+            tray.Dispose();
+        };
         timer.Start();
     }
 
@@ -79,7 +94,8 @@ internal sealed class UsageForm : Form
         var close = new IconButton(IconButton.Icon.Close);
         StyleButton(close, new Point(225, 2), new Size(20, 20));
         close.FlatAppearance.MouseOverBackColor = Color.FromArgb(71, 45, 48);
-        close.Click += (_, _) => Close();
+        close.AccessibleName = "트레이로 숨기기";
+        close.Click += (_, _) => Hide();
         header.Controls.Add(close);
 
         primaryName.SetBounds(15, 44, 120, 19);
@@ -195,6 +211,7 @@ internal sealed class UsageForm : Form
         try
         {
             var usage = await Task.Run(ReadUsage);
+            if (IsDisposed) return;
             SetWindow(primaryName, primaryPercent, primaryBar, primaryReset, usage.Primary);
             if (usage.Secondary is { } secondary)
             {
@@ -207,13 +224,22 @@ internal sealed class UsageForm : Form
                 secondaryName.Visible = secondaryPercent.Visible = secondaryBar.Visible = secondaryResetCaption.Visible = secondaryReset.Visible = false;
                 ClientSize = new Size(252, 158);
             }
-            MoveToCorner();
+            KeepOnScreen(Screen.FromControl(this));
+            var alerts = new List<string>();
+            foreach (var window in new[] { usage.Primary, usage.Secondary }.OfType<UsageWindow>())
+            {
+                var threshold = RecordAlert(settings, window);
+                if (threshold > 0) alerts.Add($"{WindowName(window.DurationMinutes)} 잔여량이 {threshold}% 미만입니다. (현재 {100 - Math.Clamp(window.UsedPercent, 0, 100)}%)");
+            }
+            var settingsSaved = SavePosition();
+            if (alerts.Count > 0) tray.ShowBalloonTip(10000, "Codex 잔여량 알림", string.Join("\n", alerts), ToolTipIcon.Warning);
+            tray.Text = $"Codex · {primaryName.Text} {primaryPercent.Text}";
             status.Top = ClientSize.Height - 25;
-            status.Text = "3분마다 갱신 · " + DateTime.Now.ToString("HH:mm");
+            status.Text = "3분마다 갱신 · " + DateTime.Now.ToString("HH:mm") + (settingsSaved ? "" : " · 설정 저장 실패");
         }
         catch
         {
-            status.Text = "갱신 실패 · " + DateTime.Now.ToString("HH:mm");
+            if (!IsDisposed) status.Text = "갱신 실패 · " + DateTime.Now.ToString("HH:mm");
         }
         finally
         {
@@ -227,7 +253,9 @@ internal sealed class UsageForm : Form
         var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
         name.Text = WindowName(window.DurationMinutes) + " 남음";
         percent.Text = $"{remaining}%";
+        percent.ForeColor = RemainingColor(remaining);
         bar.Remaining = remaining;
+        bar.Invalidate();
         var resetAt = DateTimeOffset.FromUnixTimeSeconds(window.ResetsAt);
         var timeLeft = resetAt - DateTimeOffset.Now;
         if (timeLeft < TimeSpan.Zero) timeLeft = TimeSpan.Zero;
@@ -327,15 +355,142 @@ internal sealed class UsageForm : Form
         return candidateInApp ?? throw new FileNotFoundException("Codex CLI를 찾을 수 없습니다.");
     }
 
-    private void MoveToCorner()
+    private static Color RemainingColor(int remaining) => remaining < 10
+        ? Color.FromArgb(244, 105, 105)
+        : remaining < 30 ? Color.FromArgb(241, 194, 91) : Accent;
+
+    private static int RecordAlert(WidgetSettings settings, UsageWindow window)
     {
-        var area = Screen.PrimaryScreen!.WorkingArea;
-        Location = new Point(area.Right - Width - 16, area.Bottom - Height - 16);
+        var key = window.DurationMinutes.ToString();
+        if (!settings.Alerts.TryGetValue(key, out var state) || state.ResetsAt != window.ResetsAt)
+            settings.Alerts[key] = state = new AlertState { ResetsAt = window.ResetsAt };
+        var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
+        var level = remaining < 10 ? 2 : remaining < 30 ? 1 : 0;
+        if (level <= state.Level) return 0;
+        state.Level = level;
+        return level == 2 ? 10 : 30;
+    }
+
+    private void BuildTrayMenu()
+    {
+        var menu = new ContextMenuStrip();
+        var toggle = new ToolStripMenuItem("위젯 숨기기", null, (_, _) => ToggleVisibility());
+        menu.Items.Add(toggle);
+        menu.Items.Add("새로고침", null, async (_, _) => await RefreshUsageAsync());
+        menu.Items.Add("투명도 / 자동 실행", null, (_, _) => { ShowWidget(); ShowOpacityPicker(); });
+        var monitors = new ToolStripMenuItem("표시 모니터");
+        menu.Items.Add(monitors);
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("종료", null, (_, _) => Close());
+        menu.Opening += (_, _) =>
+        {
+            toggle.Text = Visible ? "위젯 숨기기" : "위젯 보이기";
+            while (monitors.DropDownItems.Count > 0) monitors.DropDownItems[0].Dispose();
+            foreach (var screen in Screen.AllScreens)
+            {
+                var item = new ToolStripMenuItem($"{screen.DeviceName} ({screen.Bounds.Width} × {screen.Bounds.Height})")
+                { Checked = screen.DeviceName == Screen.FromControl(this).DeviceName };
+                item.Click += (_, _) =>
+                {
+                    var area = screen.WorkingArea;
+                    Location = new Point(area.Right - Width - 16, area.Bottom - Height - 16);
+                    KeepOnScreen(screen);
+                    SavePosition();
+                    ShowWidget();
+                };
+                monitors.DropDownItems.Add(item);
+            }
+        };
+        tray.ContextMenuStrip = menu;
+        tray.DoubleClick += (_, _) => ToggleVisibility();
+        tray.BalloonTipClicked += (_, _) => ShowWidget();
+    }
+
+    private void ToggleVisibility()
+    {
+        if (Visible) Hide(); else ShowWidget();
+    }
+
+    private void ShowWidget()
+    {
+        KeepOnScreen(Screen.FromControl(this));
+        Show();
+        Activate();
+    }
+
+    private void RestorePosition()
+    {
+        var screen = Screen.AllScreens.FirstOrDefault(s => s.DeviceName == settings.Monitor) ?? Screen.PrimaryScreen!;
+        var area = screen.WorkingArea;
+        Location = settings.X is { } x && settings.Y is { } y
+            ? new Point(area.Left + x, area.Top + y)
+            : new Point(area.Right - Width - 16, area.Bottom - Height - 16);
+        KeepOnScreen(screen);
+    }
+
+    private void KeepOnScreen(Screen screen)
+    {
+        var area = screen.WorkingArea;
+        Location = new Point(Math.Clamp(Left, area.Left, Math.Max(area.Left, area.Right - Width)),
+            Math.Clamp(Top, area.Top, Math.Max(area.Top, area.Bottom - Height)));
+    }
+
+    private void DisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)RestorePosition);
+    }
+
+    private bool SavePosition()
+    {
+        var screen = Screen.FromControl(this);
+        settings.Monitor = screen.DeviceName;
+        settings.X = Left - screen.WorkingArea.Left;
+        settings.Y = Top - screen.WorkingArea.Top;
+        settings.Opacity = Opacity;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(SettingsPath)!);
+            File.WriteAllText(SettingsPath + ".tmp", JsonSerializer.Serialize(settings));
+            File.Move(SettingsPath + ".tmp", SettingsPath, true);
+            return true;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            status.Text = "설정 저장 실패";
+            return false;
+        }
+    }
+
+    private static WidgetSettings LoadSettings()
+    {
+        try
+        {
+            return File.Exists(SettingsPath) ? JsonSerializer.Deserialize<WidgetSettings>(File.ReadAllText(SettingsPath)) ?? new() : new();
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return new();
+        }
+    }
+
+    private sealed class WidgetSettings
+    {
+        public string? Monitor { get; set; }
+        public int? X { get; set; }
+        public int? Y { get; set; }
+        public double Opacity { get; set; } = 1;
+        public Dictionary<string, AlertState> Alerts { get; set; } = new();
+    }
+
+    private sealed class AlertState
+    {
+        public long ResetsAt { get; set; }
+        public int Level { get; set; }
     }
 
     private void ShowOpacityPicker()
     {
-        var picker = new OpacityPicker(Opacity, value => Opacity = value, IsStartupEnabled(), SetStartupEnabled);
+        var picker = new OpacityPicker(Opacity, value => { Opacity = value; SavePosition(); }, IsStartupEnabled(), SetStartupEnabled);
         var area = Screen.FromControl(this).WorkingArea;
         var x = Math.Min(Right - picker.Width, area.Right - picker.Width - 8);
         var y = Bottom + 6;
@@ -396,7 +551,7 @@ internal sealed class UsageForm : Form
             var width = (int)(ClientSize.Width * Math.Clamp(Remaining, 0, 100) / 100d);
             if (width > 0)
             {
-                using var brush = new SolidBrush(Color.FromArgb(82, 207, 145));
+                using var brush = new SolidBrush(RemainingColor(Remaining));
                 e.Graphics.FillRectangle(brush, 0, 0, width, ClientSize.Height);
             }
         }
