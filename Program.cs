@@ -34,7 +34,7 @@ internal sealed class UsageForm : Form
     private readonly Label secondaryReset = new();
     private readonly Label status = new();
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 180_000 };
-    private readonly NotifyIcon tray = new() { Icon = SystemIcons.Application, Text = "Codex 사용량", Visible = true };
+    private readonly NotifyIcon tray = new() { Text = "Codex 사용량" };
     private readonly WidgetSettings settings = LoadSettings();
     private static readonly string SettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageWidget", "settings.json");
     private bool refreshing;
@@ -42,6 +42,9 @@ internal sealed class UsageForm : Form
     public UsageForm()
     {
         Text = "Codex Usage";
+        Icon = LoadIcon();
+        tray.Icon = Icon;
+        tray.Visible = true;
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         TopMost = true;
@@ -65,6 +68,7 @@ internal sealed class UsageForm : Form
             tray.Visible = false;
             tray.ContextMenuStrip?.Dispose();
             tray.Dispose();
+            Icon?.Dispose();
         };
         timer.Start();
     }
@@ -135,6 +139,13 @@ internal sealed class UsageForm : Form
         status.Font = new Font("Segoe UI", 7.5f);
         status.ForeColor = Color.FromArgb(128, 137, 149);
         Controls.Add(status);
+    }
+
+    private static Icon LoadIcon()
+    {
+        using var stream = typeof(UsageForm).Assembly.GetManifestResourceStream("CodexUsageWidget.Widget.ico")!;
+        using var icon = new Icon(stream);
+        return (Icon)icon.Clone();
     }
 
     private void AddReset(Label label, Label caption, int top)

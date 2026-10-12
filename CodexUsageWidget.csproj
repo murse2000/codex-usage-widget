@@ -8,5 +8,9 @@
     <Nullable>enable</Nullable>
     <AssemblyName>CodexUsageWidget</AssemblyName>
     <RootNamespace>CodexUsageWidget</RootNamespace>
+    <ApplicationIcon>assets\Widget.ico</ApplicationIcon>
   </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="assets\Widget.ico" LogicalName="CodexUsageWidget.Widget.ico" />
+  </ItemGroup>
 </Project>
