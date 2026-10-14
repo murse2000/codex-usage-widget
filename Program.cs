@@ -38,9 +38,13 @@ internal sealed class UsageForm : Form
     private readonly WidgetSettings settings = LoadSettings();
     private static readonly string SettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageWidget", "settings.json");
     private bool refreshing;
+    private bool hasSecondary;
 
     public UsageForm()
     {
+        SuspendLayout();
+        AutoScaleDimensions = new SizeF(96, 96);
+        AutoScaleMode = AutoScaleMode.Dpi;
         Text = "Codex Usage";
         Icon = LoadIcon();
         tray.Icon = Icon;
@@ -53,6 +57,7 @@ internal sealed class UsageForm : Form
         BackColor = Background;
         ForeColor = TextColor;
         BuildUi();
+        ResumeLayout(true);
         BuildTrayMenu();
         Opacity = Math.Clamp(settings.Opacity, 0.45, 1);
         RestorePosition();
@@ -76,6 +81,7 @@ internal sealed class UsageForm : Form
     private void BuildUi()
     {
         var header = new Panel { Location = new Point(1, 1), Size = new Size(250, 25), BackColor = HeaderBackground };
+        header.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         Controls.Add(header);
         header.MouseDown += DragWindow;
 
@@ -109,11 +115,13 @@ internal sealed class UsageForm : Form
 
         primaryPercent.SetBounds(130, 38, 106, 35);
         primaryPercent.TextAlign = ContentAlignment.MiddleRight;
+        primaryPercent.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         primaryPercent.Font = new Font("Segoe UI", 20, FontStyle.Bold);
         primaryPercent.ForeColor = TextColor;
         Controls.Add(primaryPercent);
 
         primaryBar.SetBounds(15, 77, 221, 5);
+        primaryBar.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         Controls.Add(primaryBar);
         AddReset(primaryReset, new Label(), 94);
 
@@ -125,18 +133,21 @@ internal sealed class UsageForm : Form
 
         secondaryPercent.SetBounds(130, 126, 106, 35);
         secondaryPercent.TextAlign = ContentAlignment.MiddleRight;
+        secondaryPercent.Anchor = AnchorStyles.Top | AnchorStyles.Right;
         secondaryPercent.Font = new Font("Segoe UI", 20, FontStyle.Bold);
         secondaryPercent.ForeColor = TextColor;
         secondaryPercent.Visible = false;
         Controls.Add(secondaryPercent);
 
         secondaryBar.SetBounds(15, 165, 221, 5);
+        secondaryBar.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         secondaryBar.Visible = false;
         Controls.Add(secondaryBar);
         AddReset(secondaryReset, secondaryResetCaption, 182);
 
         status.SetBounds(15, 133, 221, 16);
         status.Font = new Font("Segoe UI", 7.5f);
+        status.AutoSize = true;
         status.ForeColor = Color.FromArgb(128, 137, 149);
         Controls.Add(status);
     }
@@ -154,12 +165,12 @@ internal sealed class UsageForm : Form
         caption.Font = new Font("Segoe UI", 8);
         caption.ForeColor = Color.FromArgb(128, 137, 149);
         caption.Location = new Point(15, top);
-        caption.Size = new Size(42, 17);
+        caption.AutoSize = true;
         caption.Visible = top < 120;
         label.Font = new Font("Segoe UI", 7.5f);
         label.ForeColor = Color.FromArgb(211, 216, 224);
         label.Location = new Point(58, top - 1);
-        label.Size = new Size(178, 18);
+        label.AutoSize = true;
         label.Visible = top < 120;
         Controls.Add(caption);
         Controls.Add(label);
@@ -175,6 +186,7 @@ internal sealed class UsageForm : Form
         button.BackColor = HeaderBackground;
         button.Location = location;
         button.Size = size;
+        button.Anchor = AnchorStyles.Top | AnchorStyles.Right;
     }
 
     private sealed class IconButton : Button
@@ -224,29 +236,34 @@ internal sealed class UsageForm : Form
             var usage = await Task.Run(ReadUsage);
             if (IsDisposed) return;
             SetWindow(primaryName, primaryPercent, primaryBar, primaryReset, usage.Primary);
+            hasSecondary = usage.Secondary is not null;
             if (usage.Secondary is { } secondary)
             {
                 SetWindow(secondaryName, secondaryPercent, secondaryBar, secondaryReset, secondary);
                 secondaryName.Visible = secondaryPercent.Visible = secondaryBar.Visible = secondaryResetCaption.Visible = secondaryReset.Visible = true;
-                ClientSize = new Size(252, 223);
             }
             else
             {
                 secondaryName.Visible = secondaryPercent.Visible = secondaryBar.Visible = secondaryResetCaption.Visible = secondaryReset.Visible = false;
-                ClientSize = new Size(252, 158);
             }
-            KeepOnScreen(Screen.FromControl(this));
             var alerts = new List<string>();
             foreach (var window in new[] { usage.Primary, usage.Secondary }.OfType<UsageWindow>())
             {
                 var threshold = RecordAlert(settings, window);
                 if (threshold > 0) alerts.Add($"{WindowName(window.DurationMinutes)} 잔여량이 {threshold}% 미만입니다. (현재 {100 - Math.Clamp(window.UsedPercent, 0, 100)}%)");
             }
+            var updateText = "3분마다 갱신 · " + DateTime.Now.ToString("HH:mm");
+            status.Text = updateText;
+            FitUsageLayout();
+            KeepOnScreen(Screen.FromControl(this));
             var settingsSaved = SavePosition();
             if (alerts.Count > 0) tray.ShowBalloonTip(10000, "Codex 잔여량 알림", string.Join("\n", alerts), ToolTipIcon.Warning);
             tray.Text = $"Codex · {primaryName.Text} {primaryPercent.Text}";
-            status.Top = ClientSize.Height - 25;
-            status.Text = "3분마다 갱신 · " + DateTime.Now.ToString("HH:mm") + (settingsSaved ? "" : " · 설정 저장 실패");
+            if (!settingsSaved)
+            {
+                status.Text = updateText + " · 설정 저장 실패";
+                FitUsageLayout();
+            }
         }
         catch
         {
@@ -271,6 +288,16 @@ internal sealed class UsageForm : Form
         var timeLeft = resetAt - DateTimeOffset.Now;
         if (timeLeft < TimeSpan.Zero) timeLeft = TimeSpan.Zero;
         reset.Text = $"{resetAt.LocalDateTime:M/d HH:mm} ({(int)timeLeft.TotalDays}일 {timeLeft.Hours:00}시간 남음)";
+    }
+
+    private void FitUsageLayout()
+    {
+        var baseSize = LogicalToDeviceUnits(new Size(252, hasSecondary ? 223 : 158));
+        var margin = LogicalToDeviceUnits(15);
+        var lastReset = hasSecondary ? secondaryReset : primaryReset;
+        status.Top = Math.Max(baseSize.Height - LogicalToDeviceUnits(25), lastReset.Bottom + LogicalToDeviceUnits(14));
+        ClientSize = new Size(Math.Max(baseSize.Width, Math.Max(status.Right, Math.Max(primaryReset.Right, hasSecondary ? secondaryReset.Right : 0)) + margin),
+            Math.Max(baseSize.Height, status.Bottom + LogicalToDeviceUnits(9)));
     }
 
     private static string WindowName(int minutes) => minutes switch
@@ -576,19 +603,33 @@ internal sealed class UsageForm : Form
 
         public OpacityPicker(double current, Action<double> onChange, bool startupEnabled, Action<bool> onStartupChange)
         {
+            SuspendLayout();
+            AutoScaleDimensions = new SizeF(96, 96);
+            AutoScaleMode = AutoScaleMode.Dpi;
             FormBorderStyle = FormBorderStyle.FixedToolWindow;
             ShowInTaskbar = false;
             TopMost = true;
             BackColor = HeaderBackground;
             ForeColor = TextColor;
-            ClientSize = new Size(230, 106);
+            AutoSize = true;
+            AutoSizeMode = AutoSizeMode.GrowAndShrink;
+            var layout = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                FlowDirection = FlowDirection.TopDown,
+                WrapContents = false,
+                Padding = new Padding(10)
+            };
+            Controls.Add(layout);
             Text = "투명도";
             valueLabel.Text = $"투명도  {Math.Round(current * 100)}%";
             valueLabel.Font = new Font("Segoe UI", 8.5f);
             valueLabel.ForeColor = TextColor;
-            valueLabel.Location = new Point(10, 7);
-            valueLabel.Size = new Size(210, 17);
-            Controls.Add(valueLabel);
+            valueLabel.AutoSize = true;
+            valueLabel.Margin = new Padding(0, 0, 0, 4);
+            layout.Controls.Add(valueLabel);
 
             slider.Minimum = 45;
             slider.Maximum = 100;
@@ -596,32 +637,23 @@ internal sealed class UsageForm : Form
             slider.SmallChange = 5;
             slider.LargeChange = 10;
             slider.Value = Math.Clamp((int)Math.Round(current * 100), slider.Minimum, slider.Maximum);
-            slider.SetBounds(6, 27, 218, 34);
+            slider.AutoSize = false;
+            slider.Size = new Size(210, 34);
+            slider.Margin = new Padding(0, 0, 0, 8);
             slider.ValueChanged += (_, _) =>
             {
                 valueLabel.Text = $"투명도  {slider.Value}%";
                 onChange(slider.Value / 100d);
             };
-            Controls.Add(slider);
+            layout.Controls.Add(slider);
 
-            startupCheck.Text = string.Empty;
+            startupCheck.Text = "윈도우 시작 시 자동 실행";
             startupCheck.Font = new Font("Segoe UI", 9);
             startupCheck.ForeColor = TextColor;
-            startupCheck.SetBounds(9, 68, 22, 24);
-            startupCheck.AutoSize = false;
+            startupCheck.AutoSize = true;
+            startupCheck.Margin = Padding.Empty;
             startupCheck.AccessibleName = "윈도우 시작 시 자동 실행";
             startupCheck.Checked = startupEnabled;
-            var startupLabel = new Label
-            {
-                Text = "윈도우 시작 시 자동 실행",
-                Font = new Font("Segoe UI", 9),
-                ForeColor = TextColor,
-                Location = new Point(34, 64),
-                Size = new Size(190, 32),
-                TextAlign = ContentAlignment.MiddleLeft,
-                Cursor = Cursors.Hand
-            };
-            startupLabel.Click += (_, _) => startupCheck.Checked = !startupCheck.Checked;
             var updatingStartupCheck = false;
             startupCheck.CheckedChanged += (_, _) =>
             {
@@ -639,8 +671,8 @@ internal sealed class UsageForm : Form
                     MessageBox.Show(this, $"시작프로그램 설정을 저장하지 못했습니다.\n{error.Message}", "Codex Usage", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             };
-            Controls.Add(startupCheck);
-            Controls.Add(startupLabel);
+            layout.Controls.Add(startupCheck);
+            ResumeLayout(true);
         }
     }
 

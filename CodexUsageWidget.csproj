@@ -11,6 +11,7 @@
     <ApplicationIcon>assets\Widget.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
     <EmbeddedResource Include="assets\Widget.ico" LogicalName="CodexUsageWidget.Widget.ico" />
   </ItemGroup>
 </Project>

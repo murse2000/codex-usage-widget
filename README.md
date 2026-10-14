@@ -12,9 +12,17 @@
 
 Codex CLI의 app-server 프로토콜을 사용합니다. 별도의 비밀번호나 API 키를 저장하지 않습니다.
 
+초기화 문구는 글자 크기와 길이에 맞춰 표시 영역을 확보합니다. 투명도 창은 슬라이더와 자동 실행 체크박스를 자동으로 세로 배치해 겹침을 방지합니다.
+
 소스에서 실행 파일을 만들려면 .NET 8 SDK가 필요합니다.
 
 ```powershell
 dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:DebugType=None -o obj/publish
 Copy-Item obj/publish/CodexUsageWidget.exe . -Force
+```
+
+레이아웃 회귀 검증은 연결된 모니터, 한도 1개/2개 표시, 확대된 글꼴에서 초기화 문구와 체크박스의 크기·겹침을 확인합니다. 검증 중 사용자 설정 파일은 백업한 뒤 복원합니다.
+
+```powershell
+dotnet run --project tests/LayoutVerification.csproj -c Release
 ```
