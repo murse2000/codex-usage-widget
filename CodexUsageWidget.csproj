@@ -9,9 +9,12 @@
     <AssemblyName>CodexUsageWidget</AssemblyName>
     <RootNamespace>CodexUsageWidget</RootNamespace>
     <ApplicationIcon>assets\Widget.ico</ApplicationIcon>
+    <Version>1.1.0</Version>
+    <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="tests\**\*.cs" />
     <EmbeddedResource Include="assets\Widget.ico" LogicalName="CodexUsageWidget.Widget.ico" />
+    <EmbeddedResource Include="InstallUpdate.ps1" LogicalName="CodexUsageWidget.InstallUpdate.ps1" />
   </ItemGroup>
 </Project>

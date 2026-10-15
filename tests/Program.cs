@@ -7,9 +7,38 @@ internal static class Program
     private static int checks;
 
     [STAThread]
-    private static void Main()
+    private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+        if (args.Contains("--update-worker"))
+        {
+            try { UpdateVerification.InstallWorker(args[1], args[2]); }
+            catch (Exception error) { Console.Error.WriteLine(error); Environment.ExitCode = 1; }
+            return;
+        }
+        if (args.Contains("--updates") || args.Contains("--release-live"))
+        {
+            Exception? failure = null;
+            using var host = new Form { ShowInTaskbar = false, Opacity = 0 };
+            host.Shown += (_, _) =>
+            {
+                try
+                {
+                    if (args.Contains("--release-live")) UpdateVerification.RunLive(args[1]);
+                    else UpdateVerification.Run();
+                }
+                catch (Exception error) { failure = error; }
+                finally { host.Close(); }
+            };
+            Application.Run(host);
+            if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            return;
+        }
+        if (args.Contains("--tibo"))
+        {
+            TiboVerification.Run(args.Contains("--live"));
+            return;
+        }
         var settingsPath = (string)FormType.GetField("SettingsPath", Private)!.GetValue(null)!;
         var backup = File.Exists(settingsPath) ? File.ReadAllBytes(settingsPath) : null;
         Directory.CreateDirectory("obj/layout-verification");

@@ -34,11 +34,22 @@ internal sealed class UsageForm : Form
     private readonly Label secondaryReset = new();
     private readonly Label status = new();
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 180_000 };
+    private readonly System.Windows.Forms.Timer tiboTimer = new() { Interval = 120_000 };
+    private readonly System.Windows.Forms.Timer updateTimer = new() { Interval = 21_600_000 };
+    private readonly ToolStripMenuItem updateStatus = new($"현재 v{AppUpdate.CurrentVersion.ToString(3)}") { Enabled = false };
+    private readonly ToolStripMenuItem updateCheck = new("업데이트 확인");
+    private readonly HttpClient tiboClient = new() { Timeout = TimeSpan.FromSeconds(15), MaxResponseContentBufferSize = 262144 };
+    private readonly ToolStripMenuItem tiboStatus = new("아직 확인하지 않음") { Enabled = false };
+    private readonly ToolStripMenuItem tiboOriginal = new("최근 예고 X 원문") { Enabled = false };
     private readonly NotifyIcon tray = new() { Text = "Codex 사용량" };
     private readonly WidgetSettings settings = LoadSettings();
     private static readonly string SettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageWidget", "settings.json");
     private bool refreshing;
     private bool hasSecondary;
+    private bool checkingTibo;
+    private DateTimeOffset nextTiboCheck;
+    private TiboNotice? tiboNotice;
+    private bool checkingUpdate;
 
     public UsageForm()
     {
@@ -64,11 +75,20 @@ internal sealed class UsageForm : Form
         ResizeEnd += (_, _) => SavePosition();
         SystemEvents.DisplaySettingsChanged += DisplaySettingsChanged;
         timer.Tick += async (_, _) => await RefreshUsageAsync();
+        tiboTimer.Tick += async (_, _) => await RefreshTiboAsync();
         Shown += async (_, _) => await RefreshUsageAsync();
+        Shown += async (_, _) => await RefreshTiboAsync();
+        Shown += async (_, _) => await CheckUpdateAsync(false);
+        updateTimer.Tick += async (_, _) => await CheckUpdateAsync(false);
         FormClosed += (_, _) =>
         {
             timer.Stop();
             timer.Dispose();
+            tiboTimer.Stop();
+            tiboTimer.Dispose();
+            tiboClient.Dispose();
+            updateTimer.Stop();
+            updateTimer.Dispose();
             SystemEvents.DisplaySettingsChanged -= DisplaySettingsChanged;
             tray.Visible = false;
             tray.ContextMenuStrip?.Dispose();
@@ -76,6 +96,8 @@ internal sealed class UsageForm : Form
             Icon?.Dispose();
         };
         timer.Start();
+        tiboTimer.Start();
+        updateTimer.Start();
     }
 
     private void BuildUi()
@@ -290,6 +312,114 @@ internal sealed class UsageForm : Form
         reset.Text = $"{resetAt.LocalDateTime:M/d HH:mm} ({(int)timeLeft.TotalDays}일 {timeLeft.Hours:00}시간 남음)";
     }
 
+    private async Task RefreshTiboAsync()
+    {
+        if (checkingTibo || IsDisposed || !settings.TiboAlertsEnabled || DateTimeOffset.UtcNow < nextTiboCheck) return;
+        checkingTibo = true;
+        nextTiboCheck = DateTimeOffset.UtcNow.AddMinutes(2);
+        try
+        {
+            var result = await TiboResetFeed.ReadAsync(tiboClient);
+            if (IsDisposed || !settings.TiboAlertsEnabled) return;
+            nextTiboCheck = result.RetryAt;
+            if (result.Snapshot is { } snapshot) ApplyTiboSnapshot(snapshot);
+            else tiboStatus.Text = $"요청 제한 · {nextTiboCheck.LocalDateTime:HH:mm} 이후 재확인";
+        }
+        catch (Exception error)
+        {
+            if (!IsDisposed && settings.TiboAlertsEnabled)
+                tiboStatus.Text = error is InvalidDataException ? error.Message : "공지 조회 실패 · 2분 후 재확인";
+        }
+        finally
+        {
+            checkingTibo = false;
+            if (!IsDisposed)
+            {
+                tiboTimer.Stop();
+                tiboTimer.Interval = (int)Math.Clamp(Math.Ceiling((nextTiboCheck - DateTimeOffset.UtcNow).TotalMilliseconds), 120_000, int.MaxValue);
+                tiboTimer.Start();
+            }
+        }
+    }
+
+    private void ApplyTiboSnapshot(TiboSnapshot snapshot)
+    {
+        tiboNotice = snapshot.Notice;
+        tiboOriginal.Enabled = tiboNotice is not null;
+        tiboStatus.Text = (tiboNotice is null ? "등록된 예고 없음" : snapshot.ReferenceTimePassed ? "예고 참고 기한 지남 · 원문 확인" : "리셋 예고 등록됨")
+            + $" · 자료 {snapshot.GeneratedAt.LocalDateTime:M/d HH:mm}";
+        if (!settings.TiboAlertsEnabled || tiboNotice is null || snapshot.ReferenceTimePassed || settings.TiboAlertKeys.Contains(tiboNotice.AlertKey)) return;
+
+        settings.TiboAlertKeys.Add(tiboNotice.AlertKey);
+        if (!SavePosition())
+        {
+            settings.TiboAlertKeys.Remove(tiboNotice.AlertKey);
+            tiboStatus.Text = "설정 저장 실패 · 예고 알림 보류";
+            return;
+        }
+        tray.ShowBalloonTip(10000, "Tibo · Codex 리셋 예고", tiboNotice.NotificationText, ToolTipIcon.Info);
+    }
+
+    private async Task CheckUpdateAsync(bool manual)
+    {
+        if (checkingUpdate || IsDisposed) return;
+        checkingUpdate = true;
+        updateCheck.Enabled = false;
+        string? directory = null;
+        var installerStarted = false;
+        var approved = false;
+        try
+        {
+            updateStatus.Text = "새 버전 확인 중…";
+            var release = await AppUpdate.FindAsync();
+            if (IsDisposed) return;
+            if (release is null)
+            {
+                updateStatus.Text = $"v{AppUpdate.CurrentVersion.ToString(3)} · 최신 버전";
+                if (manual) MessageBox.Show(this, "현재 최신 버전을 사용하고 있습니다.", "Codex 업데이트", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+            updateStatus.Text = $"새 버전 {release.Tag} 사용 가능";
+            if (!manual && settings.DeclinedUpdateVersion == release.Tag) return;
+            ShowWidget();
+            if (MessageBox.Show(this, $"새 버전 {release.Tag}이 있습니다. (현재 v{AppUpdate.CurrentVersion.ToString(3)})\n\n다운로드하고 설치할까요? 설치할 때 위젯이 종료된 후 다시 실행됩니다.",
+                "Codex 업데이트", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
+            {
+                settings.DeclinedUpdateVersion = release.Tag;
+                SavePosition();
+                return;
+            }
+            updateStatus.Text = "업데이트 다운로드·검증 중…";
+            approved = true;
+            directory = await AppUpdate.DownloadAsync(release);
+            if (IsDisposed) return;
+            updateStatus.Text = "업데이트 설치 준비 중…";
+            SavePosition();
+            await AppUpdate.StartInstallerAsync(directory, Environment.ProcessPath!);
+            installerStarted = true;
+            Close();
+        }
+        catch (Exception error)
+        {
+            if (!IsDisposed)
+            {
+                updateStatus.Text = "확인/설치 실패 · 수동 확인으로 재시도";
+                if (manual || approved)
+                    MessageBox.Show(this, error.Message + "\n\n기존 실행 파일과 설정은 유지됩니다.", "Codex 업데이트", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+        finally
+        {
+            if (!installerStarted && directory is not null)
+            {
+                try { Directory.Delete(directory, true); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            }
+            checkingUpdate = false;
+            if (!IsDisposed) updateCheck.Enabled = true;
+        }
+    }
+
     private void FitUsageLayout()
     {
         var baseSize = LogicalToDeviceUnits(new Size(252, hasSecondary ? 223 : 158));
@@ -418,6 +548,35 @@ internal sealed class UsageForm : Form
         menu.Items.Add("투명도 / 자동 실행", null, (_, _) => { ShowWidget(); ShowOpacityPicker(); });
         var monitors = new ToolStripMenuItem("표시 모니터");
         menu.Items.Add(monitors);
+        var tibo = new ToolStripMenuItem("Tibo 리셋 예고");
+        var tiboEnabled = new ToolStripMenuItem("예고 알림 받기") { CheckOnClick = true, Checked = settings.TiboAlertsEnabled };
+        tiboEnabled.CheckedChanged += async (_, _) =>
+        {
+            settings.TiboAlertsEnabled = tiboEnabled.Checked;
+            SavePosition();
+            if (settings.TiboAlertsEnabled)
+            {
+                tiboStatus.Text = "예고 확인 대기";
+                await RefreshTiboAsync();
+            }
+            else tiboStatus.Text = "예고 알림 꺼짐";
+        };
+        if (!settings.TiboAlertsEnabled) tiboStatus.Text = "예고 알림 꺼짐";
+        tiboOriginal.Click += (_, _) =>
+        {
+            if (tiboNotice is not null) Process.Start(new ProcessStartInfo(tiboNotice.Url.AbsoluteUri) { UseShellExecute = true });
+        };
+        tibo.DropDownItems.Add(tiboEnabled);
+        tibo.DropDownItems.Add(tiboStatus);
+        tibo.DropDownItems.Add(tiboOriginal);
+        tibo.DropDownItems.Add("데이터: Codex Resets (비공식)", null,
+            (_, _) => Process.Start(new ProcessStartInfo(TiboResetFeed.SourceUrl) { UseShellExecute = true }));
+        menu.Items.Add(tibo);
+        var updates = new ToolStripMenuItem("앱 업데이트");
+        updates.DropDownItems.Add(updateStatus);
+        updateCheck.Click += async (_, _) => await CheckUpdateAsync(true);
+        updates.DropDownItems.Add(updateCheck);
+        menu.Items.Add(updates);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("종료", null, (_, _) => Close());
         menu.Opening += (_, _) =>
@@ -518,6 +677,9 @@ internal sealed class UsageForm : Form
         public int? Y { get; set; }
         public double Opacity { get; set; } = 1;
         public Dictionary<string, AlertState> Alerts { get; set; } = new();
+        public bool TiboAlertsEnabled { get; set; } = true;
+        public HashSet<string> TiboAlertKeys { get; set; } = new();
+        public string? DeclinedUpdateVersion { get; set; }
     }
 
     private sealed class AlertState

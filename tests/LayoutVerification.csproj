@@ -8,6 +8,7 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Remove="fixtures\**\*.cs" />
     <ProjectReference Include="..\CodexUsageWidget.csproj" />
   </ItemGroup>
 </Project>
