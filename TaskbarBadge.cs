@@ -16,11 +16,14 @@ internal sealed class TaskbarBadge : IDisposable
     private bool refreshing;
     private bool disposed;
     private bool stale;
+    private string? monitor;
 
     internal TaskbarBadge(Icon icon, ContextMenuStrip menu, Action openWidget)
     {
         this.icon = icon;
         this.menu = menu;
+        // 탐색기와 배율이 달라도 메뉴는 앱의 좌표계에서 생성한다.
+        _ = menu.Handle;
         this.openWidget = openWidget;
         timer.Tick += async (_, _) => await RefreshAsync();
     }
@@ -29,6 +32,13 @@ internal sealed class TaskbarBadge : IDisposable
     {
         timer.Start();
         _ = RefreshAsync();
+    }
+
+    internal void SetMonitor(string value)
+    {
+        if (monitor == value) return;
+        monitor = value;
+        if (timer.Enabled) _ = RefreshAsync();
     }
 
     internal void Update(string value)
@@ -59,8 +69,10 @@ internal sealed class TaskbarBadge : IDisposable
         refreshing = true;
         try
         {
-            var layout = await Task.Run(ReadLayout);
+            var target = monitor;
+            var layout = await Task.Run(() => ReadLayout(target));
             if (disposed) return;
+            if (target != monitor) return;
             if (layout is null)
             {
                 if (button is not null) button.Visible = false;
@@ -104,9 +116,16 @@ internal sealed class TaskbarBadge : IDisposable
 
     internal sealed record Layout(IntPtr Taskbar, Rectangle Bounds, int Dpi, Rectangle[] Occupied);
 
-    internal static Layout? ReadLayout()
+    internal static Layout? ReadLayout(string? monitor)
     {
+        var screen = Screen.AllScreens.FirstOrDefault(item => item.DeviceName == monitor) ?? Screen.PrimaryScreen!;
         var taskbar = Native.FindWindow("Shell_TrayWnd", null);
+        if (taskbar == IntPtr.Zero || Screen.FromHandle(taskbar).DeviceName != screen.DeviceName)
+        {
+            taskbar = IntPtr.Zero;
+            while ((taskbar = Native.FindWindowEx(IntPtr.Zero, taskbar, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero)
+                if (Screen.FromHandle(taskbar).DeviceName == screen.DeviceName) break;
+        }
         if (taskbar == IntPtr.Zero || !Native.IsWindowVisible(taskbar)) return null;
         using var context = new DpiContext(taskbar);
         if (!Native.GetWindowRect(taskbar, out var bounds) || bounds.Width <= bounds.Height || bounds.Height < 20) return null;
@@ -202,6 +221,23 @@ internal sealed class TaskbarBadge : IDisposable
                 ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
         }
 
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == 0x007B && ContextMenuStrip is { } menu)
+            {
+                var keyboard = m.LParam == new IntPtr(-1);
+                // 메뉴 창의 배율 문맥에서 위치를 읽어 탐색기와의 배율 차이를 해소한다.
+                menu.BeginInvoke((Action)(() =>
+                {
+                    if (IsDisposed || menu.IsDisposed) return;
+                    menu.Show(this, keyboard ? new Point(Width / 2, Height / 2) : PointToClient(Cursor.Position));
+                    Native.SetForegroundWindow(menu.Handle);
+                }));
+                return;
+            }
+            base.WndProc(ref m);
+        }
+
         protected override void Dispose(bool disposing)
         {
             base.Dispose(disposing);
@@ -239,5 +275,6 @@ internal sealed class TaskbarBadge : IDisposable
         [DllImport("user32.dll")] internal static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
         [DllImport("user32.dll")] internal static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width, int height, uint flags);
         [DllImport("user32.dll", SetLastError = true)] internal static extern bool SetLayeredWindowAttributes(IntPtr window, uint color, byte alpha, uint flags);
+        [DllImport("user32.dll")] internal static extern bool SetForegroundWindow(IntPtr window);
     }
 }

@@ -633,6 +633,7 @@ internal sealed class UsageForm : GlassForm
             ? new Point(area.Left + x, area.Top + y)
             : new Point(area.Right - Width - 16, area.Bottom - Height - 16);
         KeepOnScreen(screen);
+        taskbarBadge.SetMonitor(screen.DeviceName);
     }
 
     private void KeepOnScreen(Screen screen)
@@ -651,6 +652,7 @@ internal sealed class UsageForm : GlassForm
     {
         var screen = Screen.FromControl(this);
         settings.Monitor = screen.DeviceName;
+        taskbarBadge.SetMonitor(screen.DeviceName);
         settings.X = Left - screen.WorkingArea.Left;
         settings.Y = Top - screen.WorkingArea.Top;
         settings.Opacity = Opacity;
