@@ -10,15 +10,17 @@ internal sealed class TaskbarBadge : IDisposable
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 2000 };
     private readonly Action openWidget;
     private readonly Icon icon;
+    private readonly ContextMenuStrip menu;
     private BadgeButton? button;
     private string text = "Codex\n확인 중…";
     private bool refreshing;
     private bool disposed;
     private bool stale;
 
-    internal TaskbarBadge(Icon icon, Action openWidget)
+    internal TaskbarBadge(Icon icon, ContextMenuStrip menu, Action openWidget)
     {
         this.icon = icon;
+        this.menu = menu;
         this.openWidget = openWidget;
         timer.Tick += async (_, _) => await RefreshAsync();
     }
@@ -68,7 +70,7 @@ internal sealed class TaskbarBadge : IDisposable
             {
                 button?.Dispose();
                 using var context = new DpiContext(layout.Taskbar);
-                button = new BadgeButton(layout.Taskbar, layout.Dpi, icon);
+                button = new BadgeButton(layout.Taskbar, layout.Dpi, icon) { ContextMenuStrip = menu };
                 button.Click += (_, _) => openWidget();
                 _ = button.Handle;
             }

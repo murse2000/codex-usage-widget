@@ -57,7 +57,6 @@ internal sealed class UsageForm : GlassForm
         AutoScaleMode = AutoScaleMode.Dpi;
         Text = "Codex Usage";
         Icon = LoadIcon();
-        taskbarBadge = new TaskbarBadge(Icon, () => { if (!IsDisposed) BeginInvoke((Action)ShowWidget); });
         tray.Icon = Icon;
         tray.Visible = true;
         FormBorderStyle = FormBorderStyle.None;
@@ -69,6 +68,7 @@ internal sealed class UsageForm : GlassForm
         BuildUi();
         ResumeLayout(true);
         BuildTrayMenu();
+        taskbarBadge = new TaskbarBadge(Icon, tray.ContextMenuStrip!, () => { if (!IsDisposed) BeginInvoke((Action)ShowWidget); });
         Opacity = Math.Clamp(settings.Opacity, 0.45, 1);
         RestorePosition();
         ResizeEnd += (_, _) => SavePosition();
@@ -608,6 +608,7 @@ internal sealed class UsageForm : GlassForm
             }
         };
         tray.ContextMenuStrip = menu;
+        ContextMenuStrip = menu;
         tray.DoubleClick += (_, _) => ToggleVisibility();
         tray.BalloonTipClicked += (_, _) => ShowWidget();
     }

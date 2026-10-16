@@ -29,6 +29,19 @@ internal static class TaskbarVerification
         using var image = new Bitmap(rect.Right - rect.Left, rect.Bottom - rect.Top);
         using (var graphics = Graphics.FromImage(image)) graphics.CopyFromScreen(rect.Left, rect.Top, 0, 0, image.Size);
         image.Save("obj/taskbar-verification/published.png");
+        ShowWindow(main, 0);
+        var point = new Point((rect.Left + rect.Right) / 2, (rect.Top + rect.Bottom) / 2);
+        SendMessage(button, 0x007B, button, new IntPtr((point.Y << 16) | (point.X & 0xFFFF)));
+        var popupLookup = Task.Run(() => AutomationElement.RootElement.FindFirst(TreeScope.Children,
+            new AndCondition(new PropertyCondition(AutomationElement.ProcessIdProperty, processId),
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Menu))));
+        Wait(() => popupLookup.IsCompleted);
+        var popup = popupLookup.GetAwaiter().GetResult();
+        Check(popup is not null, "배포 EXE에서 작업표시줄 우클릭으로 메뉴 표시");
+        var show = popup!.FindFirst(TreeScope.Children, new PropertyCondition(AutomationElement.NameProperty, "위젯 보이기"));
+        Check(show is not null, "배포 EXE 메뉴에 실제 창 상태 반영");
+        ((InvokePattern)show!.GetCurrentPattern(InvokePattern.Pattern)).Invoke();
+        Wait(() => IsWindowVisible(main));
         Console.WriteLine($"배포 실행 파일 검증 {checks}개 통과");
     }
 
@@ -40,12 +53,15 @@ internal static class TaskbarVerification
         Check(Find(bounds, new[] { bounds }, new Size(130, 38)) is null, "공간 부족 시 다른 아이콘과 겹치지 않음");
         Check(Find(bounds, occupied, new Size(130, 50)) is null, "높이 부족 시 표시하지 않음");
         using var icon = new Icon("assets/Widget.ico");
+        using var menu = new ContextMenuStrip();
+        menu.Items.Add("검증 메뉴");
         var clicked = false;
-        using var badge = (IDisposable)Activator.CreateInstance(Badge, Flags, null, new object[] { icon, (Action)(() => clicked = true) }, null)!;
+        using var badge = (IDisposable)Activator.CreateInstance(Badge, Flags, null, new object[] { icon, menu, (Action)(() => clicked = true) }, null)!;
         Invoke(badge, "Update", "5시간 73%\n주간 54%");
         Invoke(badge, "Start");
         Wait(() => Button(badge) is { Visible: true });
         var button = Button(badge)!;
+        Check(ReferenceEquals(button.ContextMenuStrip, menu), "작업표시줄 버튼에 공유 메뉴 연결");
         var layout = Badge.GetMethod("ReadLayout", Flags)!.Invoke(null, null)!;
         var taskbar = (IntPtr)layout.GetType().GetProperty("Taskbar")!.GetValue(layout)!;
         var area = (Rectangle)layout.GetType().GetProperty("Bounds")!.GetValue(layout)!;
@@ -82,6 +98,7 @@ internal static class TaskbarVerification
         button.Dispose();
         Wait(() => Button(badge) is { IsDisposed: false, Visible: true } replacement && !ReferenceEquals(replacement, button));
         Check(Button(badge)!.Text == "5시간 73%\n주간 54%", "표시 창 재생성 시 잔여량 유지");
+        Check(ReferenceEquals(Button(badge)!.ContextMenuStrip, menu), "표시 창 재생성 시 공유 메뉴 유지");
         var handle = Button(badge)!.Handle;
         badge.Dispose();
         Check(!IsWindow(handle), "종료 시 작업표시줄 표시 제거");
@@ -108,12 +125,53 @@ internal static class TaskbarVerification
             Button(badge)!.PerformClick();
             Wait(() => form.Visible);
             Check(!form.ShowInTaskbar, "클릭 시 기존 창을 표시하고 일반 앱 버튼을 추가하지 않음");
+            VerifyContextMenu(form, Button(badge)!);
         }
         finally
         {
             form.Close();
             if (backup is null) File.Delete(settings); else File.WriteAllBytes(settings, backup);
         }
+    }
+
+    private static void VerifyContextMenu(Form form, Button button)
+    {
+        var tray = (NotifyIcon)form.GetType().GetField("tray", Flags)!.GetValue(form)!;
+        var menu = tray.ContextMenuStrip!;
+        Check(ReferenceEquals(form.ContextMenuStrip, menu) && ReferenceEquals(button.ContextMenuStrip, menu), "위젯 창·작업표시줄·트레이에서 같은 메뉴 인스턴스 공유");
+        var point = button.PointToScreen(new Point(button.Width / 2, button.Height / 2));
+        form.Hide();
+        RightClick(button, point);
+        Check(menu.Items[0].Text == "위젯 보이기" && !form.Visible, "숨겨진 창을 강제로 열지 않고 우클릭 메뉴 표시");
+        var anchor = new Point(point.X, Math.Min(point.Y, Screen.FromPoint(point).WorkingArea.Bottom - 1));
+        Check(Rectangle.Inflate(menu.Bounds, 8, 8).Contains(anchor), "작업표시줄 바로 위에 메뉴 표시");
+        Check(Screen.FromPoint(point).Bounds.Contains(menu.Bounds), "작업표시줄 메뉴가 화면 밖으로 잘리지 않음");
+        var monitorMenu = menu.Items.OfType<ToolStripMenuItem>().Single(item => item.Text == "표시 모니터");
+        Check(monitorMenu.DropDownItems.Count == Screen.AllScreens.Length, "공유 메뉴의 모니터 목록 갱신");
+        var item = menu.Items[0].Bounds;
+        var click = new IntPtr(((item.Top + item.Height / 2) << 16) | (item.Left + item.Width / 2));
+        SendMessage(menu.Handle, 0x0201, new IntPtr(1), click);
+        SendMessage(menu.Handle, 0x0202, IntPtr.Zero, click);
+        Wait(() => form.Visible);
+        Check(form.Visible, "공유 메뉴의 위젯 보이기 실행");
+        var source = form.Controls.OfType<Label>().First();
+        point = source.PointToScreen(new Point(source.Width / 2, source.Height / 2));
+        RightClick(source, point);
+        Check(menu.Items[0].Text == "위젯 숨기기", "바탕화면 위젯의 글자 위에서도 같은 메뉴 표시");
+        menu.Items[0].PerformClick();
+        menu.Close();
+        Check(!form.Visible, "공유 메뉴의 위젯 숨기기 실행");
+        RightClick(button, button.PointToScreen(new Point(button.Width / 2, button.Height / 2)));
+        menu.Items.OfType<ToolStripMenuItem>().Single(item => item.Text == "위젯 설정").PerformClick();
+        menu.Close();
+        Check(form.Visible && form.OwnedForms.Length == 1, "공유 메뉴의 설정 창 열기 실행");
+        form.OwnedForms.Single().Close();
+    }
+
+    private static void RightClick(Control control, Point screen)
+    {
+        SendMessage(control.Handle, 0x007B, control.Handle, new IntPtr(unchecked((screen.Y << 16) | (screen.X & 0xFFFF))));
+        Wait(() => Application.OpenForms.Cast<Form>().Any(form => form.ContextMenuStrip?.Visible == true));
     }
 
     private static Point? Find(Rectangle bounds, Rectangle[] occupied, Size size)
@@ -147,4 +205,5 @@ internal static class TaskbarVerification
     [DllImport("user32.dll")] private static extern uint GetWindowThreadProcessId(IntPtr window, out int process);
     [DllImport("user32.dll")] private static extern bool ShowWindow(IntPtr window, int command);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 }
