@@ -9,10 +9,12 @@
     <AssemblyName>CodexUsageWidget</AssemblyName>
     <RootNamespace>CodexUsageWidget</RootNamespace>
     <ApplicationIcon>assets\Widget.ico</ApplicationIcon>
-    <Version>1.2.0</Version>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>1.3.0</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
     <Compile Remove="tests\**\*.cs" />
     <EmbeddedResource Include="assets\Widget.ico" LogicalName="CodexUsageWidget.Widget.ico" />
     <EmbeddedResource Include="InstallUpdate.ps1" LogicalName="CodexUsageWidget.InstallUpdate.ps1" />

@@ -40,6 +40,7 @@ internal sealed class UsageForm : GlassForm
     private readonly ToolStripMenuItem tiboStatus = new("아직 확인하지 않음") { Enabled = false };
     private readonly ToolStripMenuItem tiboOriginal = new("최근 예고 X 원문") { Enabled = false };
     private readonly NotifyIcon tray = new() { Text = "Codex 사용량" };
+    private readonly TaskbarBadge taskbarBadge;
     private readonly WidgetSettings settings = LoadSettings();
     private static readonly string SettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageWidget", "settings.json");
     private bool refreshing;
@@ -56,6 +57,7 @@ internal sealed class UsageForm : GlassForm
         AutoScaleMode = AutoScaleMode.Dpi;
         Text = "Codex Usage";
         Icon = LoadIcon();
+        taskbarBadge = new TaskbarBadge(Icon, () => { if (!IsDisposed) BeginInvoke((Action)ShowWidget); });
         tray.Icon = Icon;
         tray.Visible = true;
         FormBorderStyle = FormBorderStyle.None;
@@ -74,6 +76,7 @@ internal sealed class UsageForm : GlassForm
         timer.Tick += async (_, _) => await RefreshUsageAsync();
         tiboTimer.Tick += async (_, _) => await RefreshTiboAsync();
         Shown += async (_, _) => await RefreshUsageAsync();
+        Shown += (_, _) => taskbarBadge.Start();
         Shown += async (_, _) => await RefreshTiboAsync();
         Shown += async (_, _) => await CheckUpdateAsync(false);
         updateTimer.Tick += async (_, _) => await CheckUpdateAsync(false);
@@ -90,6 +93,7 @@ internal sealed class UsageForm : GlassForm
             tray.Visible = false;
             tray.ContextMenuStrip?.Dispose();
             tray.Dispose();
+            taskbarBadge.Dispose();
             Icon?.Dispose();
         };
         timer.Start();
@@ -280,6 +284,8 @@ internal sealed class UsageForm : GlassForm
             var settingsSaved = SavePosition();
             if (alerts.Count > 0) tray.ShowBalloonTip(10000, "Codex 잔여량 알림", string.Join("\n", alerts), ToolTipIcon.Warning);
             tray.Text = $"Codex · {primaryName.Text} {primaryPercent.Text}";
+            taskbarBadge.Update($"{WindowName(usage.Primary.DurationMinutes).Replace(" 한도", "")} {100 - Math.Clamp(usage.Primary.UsedPercent, 0, 100)}%\n"
+                + (usage.Secondary is { } second ? $"{WindowName(second.DurationMinutes).Replace(" 한도", "")} {100 - Math.Clamp(second.UsedPercent, 0, 100)}%" : "Codex 잔여량"));
             if (!settingsSaved)
             {
                 status.Text = updateText + " · 설정 저장 실패";
@@ -288,7 +294,11 @@ internal sealed class UsageForm : GlassForm
         }
         catch
         {
-            if (!IsDisposed) status.Text = "갱신 실패 · " + DateTime.Now.ToString("HH:mm");
+            if (!IsDisposed)
+            {
+                status.Text = "갱신 실패 · " + DateTime.Now.ToString("HH:mm");
+                taskbarBadge.MarkStale();
+            }
         }
         finally
         {

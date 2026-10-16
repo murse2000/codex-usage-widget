@@ -3,7 +3,7 @@
     <OutputType>Exe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
-    <AssemblyName>gh</AssemblyName>
+    <AssemblyName>UpdateFixture</AssemblyName>
     <Version>1.1.0</Version>
   </PropertyGroup>
 </Project>

@@ -16,7 +16,7 @@ internal static class Program
             catch (Exception error) { Console.Error.WriteLine(error); Environment.ExitCode = 1; }
             return;
         }
-        if (args.Contains("--updates") || args.Contains("--release-live"))
+        if (args.Contains("--updates") || args.Contains("--release-live") || args.Contains("--taskbar") || args.Contains("--published-taskbar"))
         {
             Exception? failure = null;
             using var host = new Form { ShowInTaskbar = false, Opacity = 0 };
@@ -24,7 +24,9 @@ internal static class Program
             {
                 try
                 {
-                    if (args.Contains("--release-live")) UpdateVerification.RunLive(args[1]);
+                    if (args.Contains("--published-taskbar")) TaskbarVerification.RunPublished(int.Parse(args[1]));
+                    else if (args.Contains("--taskbar")) TaskbarVerification.Run();
+                    else if (args.Contains("--release-live")) UpdateVerification.RunLive(args[1]);
                     else UpdateVerification.Run();
                 }
                 catch (Exception error) { failure = error; }

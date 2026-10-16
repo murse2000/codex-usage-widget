@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO.Compression;
+using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -18,7 +19,7 @@ internal static class UpdateVerification
         var root = Path.GetFullPath("obj/update-verification/한글 경로");
         Directory.CreateDirectory(root);
         var fixture = Path.GetFullPath("tests/fixtures/bin/Release/net8.0");
-        var source = Path.Combine(fixture, "gh.exe");
+        var source = Path.Combine(fixture, "UpdateFixture.exe");
         Check(File.Exists(source), "업데이트 검증용 실행 파일 준비");
         var zip = Path.Combine(root, "payload.zip");
         CreateZip(zip, source, "CodexUsageWidget.exe");
@@ -43,7 +44,7 @@ internal static class UpdateVerification
         var malicious = Path.Combine(root, "traversal.zip");
         CreateZip(malicious, source, "../CodexUsageWidget.exe");
         Reject(() => Invoke("Extract", malicious, extract, Parse(Json(Hash(malicious)), new(1, 0, 0))!), "ZIP 경로 이탈 거부");
-        VerifyConsent(root, fixture);
+        VerifyConsent();
         VerifyInstaller(root, fixture, false);
         VerifyInstaller(root, fixture, true);
         Console.WriteLine($"업데이트 검증 {checks}개 통과");
@@ -65,7 +66,7 @@ internal static class UpdateVerification
         var directory = download.GetAwaiter().GetResult();
         try
         {
-            Check(Hash(Path.Combine(directory, "CodexUsageWidget.exe")) == Hash("CodexUsageWidget.exe"), "실제 비공개 릴리스 다운로드·검증 후 로컬 EXE와 일치");
+            Check(Hash(Path.Combine(directory, "CodexUsageWidget.exe")) == Hash("CodexUsageWidget.exe"), "공개 릴리스 직접 다운로드·검증 후 로컬 EXE와 일치");
             var latest = (Task)Invoke("FindAsync")!;
             WaitUntil(() => latest.IsCompleted, 35000);
             latest.GetAwaiter().GetResult();
@@ -80,7 +81,7 @@ internal static class UpdateVerification
         Directory.CreateDirectory(installed);
         foreach (var file in Directory.GetFiles(fixture)) File.Copy(file, Path.Combine(installed, Path.GetFileName(file)));
         var target = Path.Combine(installed, "CodexUsageWidget.exe");
-        File.Copy(Path.Combine(fixture, "gh.exe"), target);
+        File.Copy(Path.Combine(fixture, "UpdateFixture.exe"), target);
         var original = Hash(target);
         var stage = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageWidget", "updates", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(stage);
@@ -116,18 +117,26 @@ internal static class UpdateVerification
         Check(!Directory.Exists(stage), "설치 임시 파일 정리 · " + damaged);
     }
 
-    private static void VerifyConsent(string root, string fixture)
+    private static void VerifyConsent()
     {
-        var path = Environment.GetEnvironmentVariable("PATH");
         var formType = App.GetType("CodexUsageWidget.UsageForm")!;
         var settingsPath = (string)formType.GetField("SettingsPath", Flags)!.GetValue(null)!;
         var backup = File.Exists(settingsPath) ? File.ReadAllBytes(settingsPath) : null;
-        var fake = Path.Combine(root, "GitHub CLI " + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(fake);
-        foreach (var file in Directory.GetFiles(fixture)) File.Copy(file, Path.Combine(fake, Path.GetFileName(file)));
-        File.WriteAllText(Path.Combine(fake, "release.json"), Json(new string('0', 64), "v9.0.0"));
-        File.WriteAllText(Path.Combine(fake, "payload.zip"), "damaged");
-        Environment.SetEnvironmentVariable("PATH", fake + Path.PathSeparator + path);
+        var requests = new List<Uri>();
+        var clientField = Updater.GetField("client", Flags)!;
+        var originalClient = (HttpClient)clientField.GetValue(null)!;
+        using var client = new HttpClient(new TestHandler(request =>
+        {
+            Check(request.Headers.Authorization is null, "로그인 토큰 없이 공개 HTTPS 요청");
+            requests.Add(request.RequestUri!);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = request.RequestUri!.Host == "api.github.com"
+                    ? new StringContent(Json(new string('0', 64), "v9.0.0")) : new StringContent("damaged")
+            };
+        }));
+        client.DefaultRequestHeaders.UserAgent.ParseAdd(originalClient.DefaultRequestHeaders.UserAgent.ToString());
+        clientField.SetValue(null, client);
         using var form = (Form)Activator.CreateInstance(formType, true)!;
         var tray = (NotifyIcon)formType.GetField("tray", Flags)!.GetValue(form)!;
         tray.Visible = false;
@@ -154,23 +163,21 @@ internal static class UpdateVerification
         try
         {
             CallCheck(false);
-            Check(decisions.Count == 2 && !Calls().Contains("release download"), "거절 시 다운로드·설치 없음");
+            Check(decisions.Count == 2 && requests.All(uri => uri.Host == "api.github.com"), "거절 시 다운로드·설치 없음");
             CallCheck(false);
             Check(decisions.Count == 2, "거절한 버전 자동 재질문 방지");
             CallCheck(true);
-            Check(Calls().Contains("release download v9.0.0"), "수동 확인 재질문·승낙 후에만 다운로드");
+            Check(requests.Any(uri => uri.AbsoluteUri == "https://github.com/murse2000/codex-usage-widget/releases/download/v9.0.0/CodexUsageWidget-win-x64.zip"), "수동 확인 재질문·승낙 후에만 직접 다운로드");
             Check(decisions.Count == 0, "손상된 다운로드의 오류 안내");
-            Check(!Calls().Contains("auth token"), "토큰을 조회·추출하지 않음");
         }
         finally
         {
             timer.Stop();
             form.Close();
-            Environment.SetEnvironmentVariable("PATH", path);
+            clientField.SetValue(null, originalClient);
             if (backup is not null) File.WriteAllBytes(settingsPath, backup);
             else if (File.Exists(settingsPath)) File.Delete(settingsPath);
         }
-        string Calls() => File.ReadAllText(Path.Combine(fake, "calls"));
         void CallCheck(bool manual)
         {
             var task = (Task)formType.GetMethod("CheckUpdateAsync", Flags)!.Invoke(form, new object[] { manual })!;
@@ -209,6 +216,11 @@ internal static class UpdateVerification
         Console.WriteLine("통과: " + message);
     }
     private delegate bool WindowCallback(IntPtr window, IntPtr parameter);
+    private sealed class TestHandler(Func<HttpRequestMessage, HttpResponseMessage> response) : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+            => Task.FromResult(response(request));
+    }
     [DllImport("user32.dll")] private static extern bool EnumThreadWindows(uint thread, WindowCallback callback, IntPtr parameter);
     [DllImport("kernel32.dll")] private static extern uint GetCurrentThreadId();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetWindowText(IntPtr window, StringBuilder text, int max);

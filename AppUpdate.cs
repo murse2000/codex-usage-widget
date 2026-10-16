@@ -13,9 +13,21 @@ internal static class AppUpdate
     internal const string Repository = "murse2000/codex-usage-widget";
     internal const string AssetName = "CodexUsageWidget-win-x64.zip";
     internal static Version CurrentVersion => typeof(AppUpdate).Assembly.GetName().Version!;
+    private static HttpClient client = CreateClient();
+
+    private static HttpClient CreateClient()
+    {
+        var result = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
+        result.DefaultRequestHeaders.UserAgent.ParseAdd($"CodexUsageWidget/{CurrentVersion.ToString(3)}");
+        return result;
+    }
 
     internal static async Task<UpdateRelease?> FindAsync()
-        => Parse(await RunGhAsync(TimeSpan.FromSeconds(30), "api", $"repos/{Repository}/releases/latest"), CurrentVersion);
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var json = await client.GetStringAsync($"https://api.github.com/repos/{Repository}/releases/latest", timeout.Token);
+        return Parse(json, CurrentVersion);
+    }
 
     internal static UpdateRelease? Parse(string json, Version installed)
     {
@@ -23,7 +35,7 @@ internal static class AppUpdate
         var root = document.RootElement;
         if (root.GetProperty("draft").GetBoolean() || root.GetProperty("prerelease").GetBoolean()) return null;
         var tag = root.GetProperty("tag_name").GetString() ?? "";
-        if (!Regex.IsMatch(tag, @"^v\d+\.\d+\.\d+$") || !Version.TryParse(tag[1..], out var version))
+        if (!Regex.IsMatch(tag, @"^v[0-9]+\.[0-9]+\.[0-9]+\z") || !Version.TryParse(tag[1..], out var version))
             throw new InvalidDataException("릴리스 버전 형식이 올바르지 않습니다.");
         if (version <= new Version(installed.Major, installed.Minor, Math.Max(0, installed.Build))) return null;
         var asset = root.GetProperty("assets").EnumerateArray().SingleOrDefault(a => a.GetProperty("name").GetString() == AssetName);
@@ -41,8 +53,25 @@ internal static class AppUpdate
         Directory.CreateDirectory(directory);
         try
         {
-            await RunGhAsync(TimeSpan.FromMinutes(5), "release", "download", release.Tag, "--repo", Repository,
-                "--pattern", AssetName, "--dir", directory);
+            using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+            using var response = await client.GetAsync($"https://github.com/{Repository}/releases/download/{release.Tag}/{AssetName}",
+                HttpCompletionOption.ResponseHeadersRead, timeout.Token);
+            response.EnsureSuccessStatusCode();
+            const int maximumSize = 100 * 1024 * 1024;
+            if (response.Content.Headers.ContentLength > maximumSize) throw new InvalidDataException("업데이트 파일이 허용 크기를 초과했습니다.");
+            await using (var input = await response.Content.ReadAsStreamAsync(timeout.Token))
+            await using (var output = File.Create(Path.Combine(directory, AssetName)))
+            {
+                var buffer = new byte[32768];
+                var total = 0L;
+                int count;
+                while ((count = await input.ReadAsync(buffer, timeout.Token)) > 0)
+                {
+                    total += count;
+                    if (total > maximumSize) throw new InvalidDataException("업데이트 파일이 허용 크기를 초과했습니다.");
+                    await output.WriteAsync(buffer.AsMemory(0, count), timeout.Token);
+                }
+            }
             await Task.Run(() => Extract(Path.Combine(directory, AssetName), directory, release));
             return directory;
         }
@@ -104,30 +133,5 @@ internal static class AppUpdate
             }
             await Task.Delay(100);
         }
-    }
-
-    private static async Task<string> RunGhAsync(TimeSpan timeout, params string[] arguments)
-    {
-        // 탐색기로 실행한 앱의 PATH에 GitHub CLI가 아직 반영되지 않은 경우도 확인한다.
-        var gh = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
-            .Select(path => Path.Combine(path.Trim('"'), "gh.exe"))
-            .Append(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "GitHub CLI", "gh.exe"))
-            .FirstOrDefault(File.Exists) ?? throw new FileNotFoundException("GitHub CLI(gh)를 설치하고 gh auth login으로 로그인하세요. 비공개 저장소 접근 권한이 필요합니다.");
-        var start = new ProcessStartInfo(gh) { UseShellExecute = false, CreateNoWindow = true,
-            RedirectStandardOutput = true, RedirectStandardError = true };
-        foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        using var process = Process.Start(start) ?? throw new IOException("GitHub CLI를 실행하지 못했습니다.");
-        var output = process.StandardOutput.ReadToEndAsync();
-        var error = process.StandardError.ReadToEndAsync();
-        try { await process.WaitForExitAsync().WaitAsync(timeout).ConfigureAwait(false); }
-        catch
-        {
-            if (!process.HasExited) process.Kill(true);
-            throw;
-        }
-        await error.ConfigureAwait(false);
-        if (process.ExitCode != 0)
-            throw new IOException("GitHub 릴리스에 접근하지 못했습니다. GitHub CLI(gh) 설치와 gh auth login, 비공개 저장소 접근 권한을 확인하세요.");
-        return await output.ConfigureAwait(false);
     }
 }
