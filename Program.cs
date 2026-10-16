@@ -15,13 +15,11 @@ internal static class Program
     }
 }
 
-internal sealed class UsageForm : Form
+internal sealed class UsageForm : GlassForm
 {
-    private static readonly Color Background = Color.FromArgb(22, 25, 30);
-    private static readonly Color HeaderBackground = Color.FromArgb(28, 32, 38);
-    private static readonly Color Muted = Color.FromArgb(155, 164, 176);
-    private static readonly Color TextColor = Color.FromArgb(239, 242, 246);
-    private static readonly Color Accent = Color.FromArgb(128, 229, 174);
+    private static readonly Color Muted = Color.FromArgb(89, 108, 134);
+    private static readonly Color TextColor = Color.FromArgb(31, 45, 67);
+    private static readonly Color Accent = Color.FromArgb(18, 137, 105);
     private readonly IconButton refreshButton = new(IconButton.Icon.Refresh);
     private readonly Label primaryName = new();
     private readonly Label primaryPercent = new();
@@ -62,10 +60,9 @@ internal sealed class UsageForm : Form
         tray.Visible = true;
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
-        TopMost = true;
+        TopMost = settings.AlwaysOnTop;
         ShowInTaskbar = false;
         ClientSize = new Size(252, 158);
-        BackColor = Background;
         ForeColor = TextColor;
         BuildUi();
         ResumeLayout(true);
@@ -102,13 +99,13 @@ internal sealed class UsageForm : Form
 
     private void BuildUi()
     {
-        var header = new Panel { Location = new Point(1, 1), Size = new Size(250, 25), BackColor = HeaderBackground };
+        var header = new Panel { Location = new Point(1, 1), Size = new Size(250, 25), BackColor = Color.Transparent };
         header.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         Controls.Add(header);
         header.MouseDown += DragWindow;
 
-        var brand = new Label { Text = "CODEX", Font = new Font("Segoe UI", 8, FontStyle.Bold), ForeColor = Accent, Location = new Point(14, 3), Size = new Size(54, 18) };
-        var heading = new Label { Text = "사용량", Font = new Font("Segoe UI", 8, FontStyle.Bold), ForeColor = Color.FromArgb(211, 216, 224), Location = new Point(68, 3), Size = new Size(58, 18) };
+        var brand = new Label { Text = "CODEX", Font = new Font("Segoe UI", 8, FontStyle.Bold), ForeColor = Color.FromArgb(53, 102, 195), Location = new Point(14, 3), Size = new Size(54, 18), BackColor = Color.Transparent };
+        var heading = new Label { Text = "사용량", Font = new Font("Segoe UI", 8, FontStyle.Bold), ForeColor = Muted, Location = new Point(68, 3), Size = new Size(58, 18), BackColor = Color.Transparent };
         header.Controls.Add(brand);
         header.Controls.Add(heading);
         brand.MouseDown += DragWindow;
@@ -118,14 +115,14 @@ internal sealed class UsageForm : Form
         refreshButton.Click += async (_, _) => await RefreshUsageAsync();
         header.Controls.Add(refreshButton);
 
-        var opacityButton = new Button { Text = "◐" };
+        var opacityButton = new Button { Text = "◐", AccessibleName = "위젯 설정" };
         StyleButton(opacityButton, new Point(180, 2), new Size(20, 20), 9);
         opacityButton.Click += (_, _) => ShowOpacityPicker();
         header.Controls.Add(opacityButton);
 
         var close = new IconButton(IconButton.Icon.Close);
         StyleButton(close, new Point(225, 2), new Size(20, 20));
-        close.FlatAppearance.MouseOverBackColor = Color.FromArgb(71, 45, 48);
+        close.FlatAppearance.MouseOverBackColor = Color.FromArgb(250, 218, 224);
         close.AccessibleName = "트레이로 숨기기";
         close.Click += (_, _) => Hide();
         header.Controls.Add(close);
@@ -170,8 +167,9 @@ internal sealed class UsageForm : Form
         status.SetBounds(15, 133, 221, 16);
         status.Font = new Font("Segoe UI", 7.5f);
         status.AutoSize = true;
-        status.ForeColor = Color.FromArgb(128, 137, 149);
+        status.ForeColor = Muted;
         Controls.Add(status);
+        foreach (var label in Controls.OfType<Label>()) label.BackColor = Color.Transparent;
     }
 
     private static Icon LoadIcon()
@@ -185,12 +183,12 @@ internal sealed class UsageForm : Form
     {
         caption.Text = "초기화";
         caption.Font = new Font("Segoe UI", 8);
-        caption.ForeColor = Color.FromArgb(128, 137, 149);
+        caption.ForeColor = Muted;
         caption.Location = new Point(15, top);
         caption.AutoSize = true;
         caption.Visible = top < 120;
         label.Font = new Font("Segoe UI", 7.5f);
-        label.ForeColor = Color.FromArgb(211, 216, 224);
+        label.ForeColor = TextColor;
         label.Location = new Point(58, top - 1);
         label.AutoSize = true;
         label.Visible = top < 120;
@@ -202,10 +200,11 @@ internal sealed class UsageForm : Form
     {
         button.FlatStyle = FlatStyle.Flat;
         button.FlatAppearance.BorderSize = 0;
-        button.FlatAppearance.MouseOverBackColor = Color.FromArgb(48, 54, 62);
+        button.FlatAppearance.MouseOverBackColor = Color.FromArgb(215, 229, 248);
+        button.FlatAppearance.MouseDownBackColor = Color.FromArgb(197, 216, 243);
         button.Font = new Font("Segoe UI Symbol", fontSize);
-        button.ForeColor = Color.FromArgb(184, 192, 203);
-        button.BackColor = HeaderBackground;
+        button.ForeColor = Muted;
+        button.BackColor = Color.Transparent;
         button.Location = location;
         button.Size = size;
         button.Anchor = AnchorStyles.Top | AnchorStyles.Right;
@@ -524,8 +523,8 @@ internal sealed class UsageForm : Form
     }
 
     private static Color RemainingColor(int remaining) => remaining < 10
-        ? Color.FromArgb(244, 105, 105)
-        : remaining < 30 ? Color.FromArgb(241, 194, 91) : Accent;
+        ? Color.FromArgb(199, 58, 69)
+        : remaining < 30 ? Color.FromArgb(173, 109, 20) : Accent;
 
     private static int RecordAlert(WidgetSettings settings, UsageWindow window)
     {
@@ -545,7 +544,7 @@ internal sealed class UsageForm : Form
         var toggle = new ToolStripMenuItem("위젯 숨기기", null, (_, _) => ToggleVisibility());
         menu.Items.Add(toggle);
         menu.Items.Add("새로고침", null, async (_, _) => await RefreshUsageAsync());
-        menu.Items.Add("투명도 / 자동 실행", null, (_, _) => { ShowWidget(); ShowOpacityPicker(); });
+        menu.Items.Add("위젯 설정", null, (_, _) => { ShowWidget(); ShowOpacityPicker(); });
         var monitors = new ToolStripMenuItem("표시 모니터");
         menu.Items.Add(monitors);
         var tibo = new ToolStripMenuItem("Tibo 리셋 예고");
@@ -676,6 +675,7 @@ internal sealed class UsageForm : Form
         public int? X { get; set; }
         public int? Y { get; set; }
         public double Opacity { get; set; } = 1;
+        public bool AlwaysOnTop { get; set; } = true;
         public Dictionary<string, AlertState> Alerts { get; set; } = new();
         public bool TiboAlertsEnabled { get; set; } = true;
         public HashSet<string> TiboAlertKeys { get; set; } = new();
@@ -690,7 +690,8 @@ internal sealed class UsageForm : Form
 
     private void ShowOpacityPicker()
     {
-        var picker = new OpacityPicker(Opacity, value => { Opacity = value; SavePosition(); }, IsStartupEnabled(), SetStartupEnabled);
+        var picker = new OpacityPicker(Opacity, value => { Opacity = value; SavePosition(); }, IsStartupEnabled(), SetStartupEnabled,
+            TopMost, value => { TopMost = settings.AlwaysOnTop = value; SavePosition(); });
         var area = Screen.FromControl(this).WorkingArea;
         var x = Math.Min(Right - picker.Width, area.Right - picker.Width - 8);
         var y = Bottom + 6;
@@ -741,37 +742,44 @@ internal sealed class UsageForm : Form
 
         public RemainingBar()
         {
-            BackColor = Color.FromArgb(49, 55, 63);
+            SetStyle(ControlStyles.SupportsTransparentBackColor, true);
+            BackColor = Color.Transparent;
             DoubleBuffered = true;
         }
 
         protected override void OnPaint(PaintEventArgs e)
         {
             base.OnPaint(e);
+            e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            using var track = GlassForm.RoundedRectangle(ClientRectangle, ClientSize.Height / 2f);
+            using var trackBrush = new SolidBrush(Color.FromArgb(34, 98, 132, 177));
+            e.Graphics.FillPath(trackBrush, track);
             var width = (int)(ClientSize.Width * Math.Clamp(Remaining, 0, 100) / 100d);
             if (width > 0)
             {
                 using var brush = new SolidBrush(RemainingColor(Remaining));
-                e.Graphics.FillRectangle(brush, 0, 0, width, ClientSize.Height);
+                using var fill = GlassForm.RoundedRectangle(new RectangleF(0, 0, width, ClientSize.Height), ClientSize.Height / 2f);
+                e.Graphics.FillPath(brush, fill);
             }
         }
     }
 
-    private sealed class OpacityPicker : Form
+    private sealed class OpacityPicker : GlassForm
     {
         private readonly TrackBar slider = new();
         private readonly Label valueLabel = new();
         private readonly CheckBox startupCheck = new();
+        private readonly CheckBox topMostCheck = new();
 
-        public OpacityPicker(double current, Action<double> onChange, bool startupEnabled, Action<bool> onStartupChange)
+        public OpacityPicker(double current, Action<double> onChange, bool startupEnabled, Action<bool> onStartupChange,
+            bool alwaysOnTop, Action<bool> onTopMostChange)
         {
             SuspendLayout();
             AutoScaleDimensions = new SizeF(96, 96);
             AutoScaleMode = AutoScaleMode.Dpi;
-            FormBorderStyle = FormBorderStyle.FixedToolWindow;
+            FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
-            TopMost = true;
-            BackColor = HeaderBackground;
+            TopMost = alwaysOnTop;
             ForeColor = TextColor;
             AutoSize = true;
             AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -782,20 +790,35 @@ internal sealed class UsageForm : Form
                 AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 FlowDirection = FlowDirection.TopDown,
                 WrapContents = false,
-                Padding = new Padding(10)
+                Padding = new Padding(15),
+                BackColor = Color.Transparent
             };
             Controls.Add(layout);
-            Text = "투명도";
+            Text = "위젯 설정";
+            var header = new Panel { Size = new Size(210, 28), Margin = new Padding(0, 0, 0, 8), BackColor = Color.Transparent };
+            var title = new Label { Text = "위젯 설정", AutoSize = true, Location = new Point(0, 3), Font = new Font("Segoe UI", 9, FontStyle.Bold), BackColor = Color.Transparent };
+            var close = new IconButton(IconButton.Icon.Close) { Size = new Size(24, 24), Location = new Point(186, 0),
+                Anchor = AnchorStyles.Top | AnchorStyles.Right, FlatStyle = FlatStyle.Flat, ForeColor = Muted, AccessibleName = "설정 닫기" };
+            close.FlatAppearance.BorderSize = 0;
+            close.FlatAppearance.MouseOverBackColor = Color.FromArgb(215, 229, 248);
+            close.Click += (_, _) => Close();
+            header.Controls.Add(title);
+            header.Controls.Add(close);
+            header.MouseDown += DragWindow;
+            title.MouseDown += DragWindow;
+            layout.Controls.Add(header);
             valueLabel.Text = $"투명도  {Math.Round(current * 100)}%";
             valueLabel.Font = new Font("Segoe UI", 8.5f);
             valueLabel.ForeColor = TextColor;
             valueLabel.AutoSize = true;
+            valueLabel.BackColor = Color.Transparent;
             valueLabel.Margin = new Padding(0, 0, 0, 4);
             layout.Controls.Add(valueLabel);
 
             slider.Minimum = 45;
             slider.Maximum = 100;
             slider.TickStyle = TickStyle.None;
+            slider.BackColor = Color.FromArgb(239, 245, 254);
             slider.SmallChange = 5;
             slider.LargeChange = 10;
             slider.Value = Math.Clamp((int)Math.Round(current * 100), slider.Minimum, slider.Maximum);
@@ -809,9 +832,24 @@ internal sealed class UsageForm : Form
             };
             layout.Controls.Add(slider);
 
+            topMostCheck.Text = "항상 위";
+            topMostCheck.AccessibleName = "항상 위";
+            topMostCheck.Font = new Font("Segoe UI", 9);
+            topMostCheck.AutoSize = true;
+            topMostCheck.BackColor = Color.Transparent;
+            topMostCheck.Margin = new Padding(0, 0, 0, 10);
+            topMostCheck.Checked = alwaysOnTop;
+            topMostCheck.CheckedChanged += (_, _) =>
+            {
+                TopMost = topMostCheck.Checked;
+                onTopMostChange(topMostCheck.Checked);
+            };
+            layout.Controls.Add(topMostCheck);
+
             startupCheck.Text = "윈도우 시작 시 자동 실행";
             startupCheck.Font = new Font("Segoe UI", 9);
             startupCheck.ForeColor = TextColor;
+            startupCheck.BackColor = Color.Transparent;
             startupCheck.AutoSize = true;
             startupCheck.Margin = Padding.Empty;
             startupCheck.AccessibleName = "윈도우 시작 시 자동 실행";
