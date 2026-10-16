@@ -9,6 +9,7 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
         ApplicationConfiguration.Initialize();
         if (args.Contains("--update-worker"))
         {
@@ -34,6 +35,11 @@ internal static class Program
             };
             Application.Run(host);
             if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            return;
+        }
+        if (args.Contains("--tibo-delivery"))
+        {
+            TiboVerification.VerifyDelivery();
             return;
         }
         if (args.Contains("--tibo"))

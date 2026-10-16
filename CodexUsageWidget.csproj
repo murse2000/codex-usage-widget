@@ -10,7 +10,7 @@
     <RootNamespace>CodexUsageWidget</RootNamespace>
     <ApplicationIcon>assets\Widget.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.3.2</Version>
+    <Version>1.3.3</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>

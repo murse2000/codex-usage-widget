@@ -5,17 +5,21 @@ using System.Text.Json;
 
 namespace CodexUsageWidget;
 
-internal sealed record TiboNotice(string Id, string Text, Uri Url, DateTimeOffset AnnouncedAt, DateTimeOffset? ReferenceAt)
+internal sealed record TiboNotice(string Id, string Text, Uri Url, DateTimeOffset AnnouncedAt, DateTimeOffset? ReferenceAt, bool IsWatch = false, int? ChancePercent = null)
 {
-    public string AlertKey => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{Id}\n{Text}\n{ReferenceAt?.ToUniversalTime():O}")));
+    public string AlertKey => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes($"{(IsWatch ? "watch\n" : "")}{Id}\n{Text}\n{ReferenceAt?.ToUniversalTime():O}")));
+    public string NotificationTitle => IsWatch ? "Tibo · 리셋 가능성 관찰" : "Tibo · Codex 리셋 예고";
 
     public string NotificationText
     {
         get
         {
             var preview = Text.Replace('\r', ' ').Replace('\n', ' ');
-            if (preview.Length > 96) preview = preview[..96] + "…";
-            return $"{preview}\n게시: {AnnouncedAt.LocalDateTime:M/d HH:mm}\n{Url}\n출처: codex-resets.com (비공식)";
+            var length = IsWatch ? 64 : 96;
+            if (preview.Length > length) preview = preview[..length] + "…";
+            var caution = IsWatch ? "확정 예고 아님" + (ChancePercent is { } chance ? $" · 서비스 추정 {chance}%" : "") + "\n" : "";
+            var time = IsWatch ? $"관찰 기한: {ReferenceAt?.LocalDateTime:M/d HH:mm}" : $"게시: {AnnouncedAt.LocalDateTime:M/d HH:mm}";
+            return $"{caution}{preview}\n{time}\n{Url}\n출처: codex-resets.com (비공식)";
         }
     }
 }
@@ -54,29 +58,41 @@ internal static class TiboResetFeed
         if (generatedAt < now.AddMinutes(-15) || generatedAt > now.AddMinutes(5))
             throw new InvalidDataException("공지 자료 갱신 지연 · 재확인 필요");
 
-        var scheduled = root.GetProperty("data").GetProperty("scheduled_reset");
-        if (scheduled.ValueKind == JsonValueKind.Null) return new(generatedAt, null, false);
-        var source = scheduled.GetProperty("source");
-        if (scheduled.GetProperty("status").GetString() != "scheduled"
+        var data = root.GetProperty("data");
+        var item = data.GetProperty("scheduled_reset");
+        var isWatch = item.ValueKind == JsonValueKind.Null;
+        if (isWatch) item = data.GetProperty("active_watch");
+        if (item.ValueKind == JsonValueKind.Null) return new(generatedAt, null, false);
+        var source = item.GetProperty("source");
+        if ((isWatch ? item.GetProperty("level").GetString() is not ("elevated" or "strong") : item.GetProperty("status").GetString() != "scheduled")
             || source.GetProperty("type").GetString() != "x_post"
             || source.GetProperty("author").GetString() != "thsottiaux")
             throw new InvalidDataException("Tibo의 X 리셋 예고를 확인할 수 없음");
 
-        var id = scheduled.GetProperty("id").GetString()!;
+        var sourceUrl = source.GetProperty("url").GetString() ?? "";
+        var id = isWatch ? sourceUrl[(sourceUrl.LastIndexOf('/') + 1)..] : item.GetProperty("id").GetString()!;
         if (string.IsNullOrEmpty(id) || !id.All(char.IsAsciiDigit)
-            || !Uri.TryCreate(source.GetProperty("url").GetString(), UriKind.Absolute, out var url)
+            || !Uri.TryCreate(sourceUrl, UriKind.Absolute, out var url)
             || url.Scheme != Uri.UriSchemeHttps || !url.IsDefaultPort || url.UserInfo.Length != 0
             || (url.Host != "x.com" && url.Host != "twitter.com")
             || url.AbsolutePath != $"/thsottiaux/status/{id}" || url.Query.Length != 0 || url.Fragment.Length != 0)
             throw new InvalidDataException("Tibo 공지 원문 링크를 확인할 수 없음");
 
-        var text = scheduled.GetProperty("text").GetString();
-        var announcedAt = scheduled.GetProperty("announced_at").GetDateTimeOffset();
+        var text = item.GetProperty("text").GetString();
+        var announcedAt = item.GetProperty(isWatch ? "observed_at" : "announced_at").GetDateTimeOffset();
         if (string.IsNullOrWhiteSpace(text) || announcedAt > now.AddMinutes(5))
             throw new InvalidDataException("Tibo 공지 내용 또는 게시 시각을 확인할 수 없음");
-        var reference = scheduled.GetProperty("scheduled_for");
+        var reference = item.GetProperty(isWatch ? "expires_at" : "scheduled_for");
         DateTimeOffset? referenceAt = reference.ValueKind == JsonValueKind.Null ? null : reference.GetDateTimeOffset();
-        // 참고 기한 경과는 리셋 완료를 뜻하지 않으며, 지난 예고를 새 알림으로 보내지 않습니다.
-        return new(generatedAt, new(id, text, url, announcedAt, referenceAt), referenceAt <= now);
+        int? chancePercent = null;
+        if (isWatch)
+        {
+            var chance = item.GetProperty("reset_chance_percent");
+            chancePercent = chance.ValueKind == JsonValueKind.Null ? null : chance.GetInt32();
+            if (referenceAt is null || referenceAt <= announcedAt || chancePercent is < 0 or > 100)
+                throw new InvalidDataException("리셋 관찰 기한 또는 추정 확률을 확인할 수 없음");
+        }
+        // 참고 기한 경과는 리셋 완료를 뜻하지 않으며, 지난 예고·관찰은 새로 알리지 않는다.
+        return new(generatedAt, new(id, text, url, announcedAt, referenceAt, isWatch, chancePercent), referenceAt <= now);
     }
 }

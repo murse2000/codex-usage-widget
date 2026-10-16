@@ -38,7 +38,7 @@ internal sealed class UsageForm : GlassForm
     private readonly ToolStripMenuItem updateCheck = new("업데이트 확인");
     private readonly HttpClient tiboClient = new() { Timeout = TimeSpan.FromSeconds(15), MaxResponseContentBufferSize = 262144 };
     private readonly ToolStripMenuItem tiboStatus = new("아직 확인하지 않음") { Enabled = false };
-    private readonly ToolStripMenuItem tiboOriginal = new("최근 예고 X 원문") { Enabled = false };
+    private readonly ToolStripMenuItem tiboOriginal = new("최근 예고·관찰 X 원문") { Enabled = false };
     private readonly NotifyIcon tray = new() { Text = "Codex 사용량" };
     private readonly TaskbarBadge taskbarBadge;
     private readonly WidgetSettings settings = LoadSettings();
@@ -355,7 +355,8 @@ internal sealed class UsageForm : GlassForm
     {
         tiboNotice = snapshot.Notice;
         tiboOriginal.Enabled = tiboNotice is not null;
-        tiboStatus.Text = (tiboNotice is null ? "등록된 예고 없음" : snapshot.ReferenceTimePassed ? "예고 참고 기한 지남 · 원문 확인" : "리셋 예고 등록됨")
+        tiboStatus.Text = (tiboNotice is null ? "등록된 예고·관찰 없음" : snapshot.ReferenceTimePassed ? "예고·관찰 기한 지남 · 원문 확인"
+            : tiboNotice.IsWatch ? "리셋 가능성 관찰 · 확정 아님" : "리셋 예고 등록됨")
             + $" · 자료 {snapshot.GeneratedAt.LocalDateTime:M/d HH:mm}";
         if (!settings.TiboAlertsEnabled || tiboNotice is null || snapshot.ReferenceTimePassed || settings.TiboAlertKeys.Contains(tiboNotice.AlertKey)) return;
 
@@ -366,7 +367,7 @@ internal sealed class UsageForm : GlassForm
             tiboStatus.Text = "설정 저장 실패 · 예고 알림 보류";
             return;
         }
-        tray.ShowBalloonTip(10000, "Tibo · Codex 리셋 예고", tiboNotice.NotificationText, ToolTipIcon.Info);
+        tray.ShowBalloonTip(10000, tiboNotice.NotificationTitle, tiboNotice.NotificationText, ToolTipIcon.Info);
     }
 
     private async Task CheckUpdateAsync(bool manual)
@@ -558,7 +559,7 @@ internal sealed class UsageForm : GlassForm
         var monitors = new ToolStripMenuItem("표시 모니터");
         menu.Items.Add(monitors);
         var tibo = new ToolStripMenuItem("Tibo 리셋 예고");
-        var tiboEnabled = new ToolStripMenuItem("예고 알림 받기") { CheckOnClick = true, Checked = settings.TiboAlertsEnabled };
+        var tiboEnabled = new ToolStripMenuItem("예고·관찰 알림 받기") { CheckOnClick = true, Checked = settings.TiboAlertsEnabled };
         tiboEnabled.CheckedChanged += async (_, _) =>
         {
             settings.TiboAlertsEnabled = tiboEnabled.Checked;
