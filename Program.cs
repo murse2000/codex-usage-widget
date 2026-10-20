@@ -284,8 +284,8 @@ internal sealed class UsageForm : GlassForm
             var settingsSaved = SavePosition();
             if (alerts.Count > 0) tray.ShowBalloonTip(10000, "Codex 잔여량 알림", string.Join("\n", alerts), ToolTipIcon.Warning);
             tray.Text = $"Codex · {primaryName.Text} {primaryPercent.Text}";
-            taskbarBadge.Update($"{WindowName(usage.Primary.DurationMinutes).Replace(" 한도", "")} {100 - Math.Clamp(usage.Primary.UsedPercent, 0, 100)}%\n"
-                + (usage.Secondary is { } second ? $"{WindowName(second.DurationMinutes).Replace(" 한도", "")} {100 - Math.Clamp(second.UsedPercent, 0, 100)}%" : "Codex 잔여량"));
+            taskbarBadge.Update($"{WindowName(usage.Primary.DurationMinutes).Replace(" 한도", "")} {100 - Math.Clamp(usage.Primary.UsedPercent, 0, 100)}% · {ResetRemainingText(usage.Primary)}\n"
+                + (usage.Secondary is { } second ? $"{WindowName(second.DurationMinutes).Replace(" 한도", "")} {100 - Math.Clamp(second.UsedPercent, 0, 100)}% · {ResetRemainingText(second)}" : "Codex 잔여량"));
             if (!settingsSaved)
             {
                 status.Text = updateText + " · 설정 저장 실패";
@@ -318,8 +318,19 @@ internal sealed class UsageForm : GlassForm
         var resetAt = DateTimeOffset.FromUnixTimeSeconds(window.ResetsAt);
         var timeLeft = resetAt - DateTimeOffset.Now;
         if (timeLeft < TimeSpan.Zero) timeLeft = TimeSpan.Zero;
-        reset.Text = $"{resetAt.LocalDateTime:M/d HH:mm} ({(int)timeLeft.TotalDays}일 {timeLeft.Hours:00}시간 남음)";
+        var remainingText = ResetRemainingText(window, timeLeft);
+        reset.Text = $"{resetAt.LocalDateTime:M/d HH:mm} ({remainingText})";
     }
+
+    private static string ResetRemainingText(UsageWindow window)
+    {
+        var timeLeft = DateTimeOffset.FromUnixTimeSeconds(window.ResetsAt) - DateTimeOffset.Now;
+        return ResetRemainingText(window, timeLeft < TimeSpan.Zero ? TimeSpan.Zero : timeLeft);
+    }
+
+    private static string ResetRemainingText(UsageWindow window, TimeSpan timeLeft) => window.DurationMinutes == 300
+        ? $"{(int)Math.Ceiling(timeLeft.TotalMinutes)}분 남음"
+        : $"{(int)timeLeft.TotalDays}일 {timeLeft.Hours:00}시간 남음";
 
     private async Task RefreshTiboAsync()
     {
