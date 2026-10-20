@@ -147,6 +147,18 @@ internal static class TiboVerification
             Check(keys.Contains(key), "새 예고 알림 이력 저장");
             apply.Invoke(form, new[] { snapshot });
             Check(keys.Count == 1, "같은 예고 반복 처리 방지");
+            var alarm = form.OwnedForms.Single();
+            Check(alarm.Visible && alarm.TopMost && alarm.ShowInTaskbar && !alarm.ControlBox,
+                "리셋 알람은 확인 가능한 별도 창으로 표시");
+            alarm.Close();
+            Check(!alarm.IsDisposed && alarm.Visible, "확인 없이 알람 닫기 차단");
+            var layout = alarm.Controls.OfType<TableLayoutPanel>().Single();
+            Check(layout.Controls.OfType<TextBox>().Single().Text.Contains((string)Property(Property(snapshot, "Notice")!, "Text")!),
+                "알람에 예고 본문 전체 표시");
+            ((Button)alarm.AcceptButton!).PerformClick();
+            Check(alarm.IsDisposed && form.OwnedForms.Length == 0, "확인 버튼으로 알람 닫기");
+            apply.Invoke(form, new[] { snapshot });
+            Check(form.OwnedForms.Length == 0, "확인한 알람은 다시 열리지 않음");
             apply.Invoke(form, new[] { Parse(Fixture(reference: Now.AddHours(3).ToString("O"))) });
             apply.Invoke(form, new[] { snapshot });
             Check(keys.Count == 2, "다른 예고 이후 이전 예고가 다시 와도 중복 방지");

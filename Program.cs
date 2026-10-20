@@ -378,7 +378,9 @@ internal sealed class UsageForm : GlassForm
             tiboStatus.Text = "설정 저장 실패 · 예고 알림 보류";
             return;
         }
-        tray.ShowBalloonTip(10000, tiboNotice.NotificationTitle, tiboNotice.NotificationText, ToolTipIcon.Info);
+        var alarm = new ResetAlarmForm(tiboNotice);
+        alarm.FormClosed += (_, _) => alarm.Dispose();
+        alarm.Show(this);
     }
 
     private async Task CheckUpdateAsync(bool manual)
