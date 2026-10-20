@@ -1,0 +1,57 @@
+name: Release Windows widget
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to release (for example v1.3.5)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Verify version tag
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          [xml]$project = Get-Content CodexUsageWidget.csproj
+          $version = $project.Project.PropertyGroup.Version
+          if ($env:RELEASE_TAG -ne "v$version") { throw 'Tag does not match project version' }
+      - name: Build and package
+        shell: pwsh
+        run: |
+          dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=true -p:DebugType=None -o obj/publish
+          if ($LASTEXITCODE -ne 0) { throw 'Publish failed' }
+          Compress-Archive -Path obj/publish/CodexUsageWidget.exe -DestinationPath obj/CodexUsageWidget-win-x64.zip
+      - name: Upload and publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG obj/publish/CodexUsageWidget.exe obj/CodexUsageWidget-win-x64.zip
+          } else {
+            gh release create $env:RELEASE_TAG obj/publish/CodexUsageWidget.exe obj/CodexUsageWidget-win-x64.zip --verify-tag --draft --title "Codex 사용량 위젯 $env:RELEASE_TAG" --generate-notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release upload failed' }
+          gh release edit $env:RELEASE_TAG --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
