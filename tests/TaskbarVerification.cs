@@ -1,3 +1,4 @@
+using System.Collections;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Automation;
@@ -78,9 +79,9 @@ internal static class TaskbarVerification
         menu.Items.Add("검증 메뉴");
         var clicked = false;
         using var badge = (IDisposable)Activator.CreateInstance(Badge, Flags, null, new object[] { icon, menu, (Action)(() => clicked = true) }, null)!;
-        Invoke(badge, "Update", "5시간 73%\n주간 54%");
+        Invoke(badge, "Update", Rows(("Codex", new object?[] { Cell("5시간", 73, "(245분)"), Cell("주간", 54, "(59시간)"), null })));
         Invoke(badge, "Start");
-        Wait(() => Button(badge) is { Visible: true });
+        Wait(() => Button(badge) is { Visible: true } first && Math.Abs(first.Font.Size - 8.5f) < 0.01f);
         var button = Button(badge)!;
         Check(ReferenceEquals(button.ContextMenuStrip, menu), "작업표시줄 버튼에 공유 메뉴 연결");
         var layout = Badge.GetMethod("ReadLayout", Flags)!.Invoke(null, new object?[] { null })!;
@@ -92,17 +93,45 @@ internal static class TaskbarVerification
         Check(!obstacles.Any(item => item.IntersectsWith(rect.Rectangle)), "실제 날씨·시작·앱·트레이 아이콘과 겹침 없음");
         Check(WindowFromPoint(new Point((rect.Left + rect.Right) / 2, (rect.Top + rect.Bottom) / 2)) == button.Handle,
             "작업표시줄 위에서 실제 클릭 가능한 위치");
-        Check(button.Text == "5시간 73%\n주간 54%", "두 줄 잔여량 표시");
+        Check(button.Text == "Codex 5시간 73% (245분) · 주간 54% (59시간)", "서비스 한 줄 잔여량 표시");
+        Check(Math.Abs(button.Font.Size - 8.5f) < 0.01f, "한 줄일 때도 기존 글자 크기");
+        Check(button.Height >= 18, "한 줄 글자 높이 확보");
+
+        Invoke(badge, "Update", Rows(
+            ("Codex", new object?[] { Cell("5시간", 73, "(245분)"), Cell("주간", 54, "(59시간)"), null }),
+            ("Go", new object?[] { Cell("5시간", 98, "(142분)"), Cell("주간", 100, "(155시간)"), Cell("월간", 27, "(10일 19시간)") })));
+        Wait(() => Button(badge) is { IsDisposed: false, Visible: true } current
+            && current.Text.Split('\n').Length == 2 && Math.Abs(current.Font.Size - 8.5f) < 0.01f);
+        var twoRows = Button(badge)!;
+        Check(Math.Abs(twoRows.Font.Size - 8.5f) < 0.01f, "두 줄일 때 기존 글자 크기");
+        Check(twoRows.Text == "Codex 5시간 73% (245분) · 주간 54% (59시간)\n"
+            + "Go 5시간 98% (142분) · 주간 100% (155시간) · 월간 27% (10일 19시간)",
+            "Codex·Go 두 줄 표시");
+        var valueColor = twoRows.GetType().GetMethod("ValueColor", Flags)!;
+        var warning = (Color)twoRows.GetType().GetProperty("WarningColor", Flags)!.GetValue(twoRows)!;
+        var danger = (Color)twoRows.GetType().GetProperty("DangerColor", Flags)!.GetValue(twoRows)!;
+        Check((Color)valueColor.Invoke(twoRows, new object[] { 50 })! == twoRows.ForeColor, "30% 이상은 기본 색");
+        Check((Color)valueColor.Invoke(twoRows, new object[] { 29 })! == warning, "30% 미만은 노란색");
+        Check((Color)valueColor.Invoke(twoRows, new object[] { 9 })! == danger, "10% 미만은 빨간색");
+        Check(GetWindowRect(twoRows.Handle, out var twoRect) && area.Contains(twoRect.Rectangle)
+            && twoRect.Bottom - twoRect.Top <= area.Height, "두 줄 배지가 작업표시줄 안에 표시");
+        var settle = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < settle) { Application.DoEvents(); Thread.Sleep(20); }
+        Check(Button(badge)!.Text.Split('\n').Length == 2 && Button(badge)!.Height >= 30,
+            "두 줄 배지가 잘리거나 줄어들지 않고 유지");
+
+        button = Button(badge)!;
         button.PerformClick();
         Check(clicked, "버튼 클릭 시 창 열기 콜백 호출");
         button.Refresh();
         var paintDeadline = DateTime.UtcNow.AddMilliseconds(500);
         while (DateTime.UtcNow < paintDeadline) { Application.DoEvents(); Thread.Sleep(20); }
         Directory.CreateDirectory("obj/taskbar-verification");
-        using (var image = new Bitmap(rect.Right - rect.Left, rect.Bottom - rect.Top))
+        Check(GetWindowRect(button.Handle, out var badgeRect), "배지 표시 영역 확인");
+        using (var image = new Bitmap(badgeRect.Right - badgeRect.Left, badgeRect.Bottom - badgeRect.Top))
         {
             using var graphics = Graphics.FromImage(image);
-            graphics.CopyFromScreen(rect.Left, rect.Top, 0, 0, image.Size);
+            graphics.CopyFromScreen(badgeRect.Left, badgeRect.Top, 0, 0, image.Size);
             image.Save("obj/taskbar-verification/taskbar.png");
             using var rendered = new Bitmap(button.Width, button.Height);
             button.DrawToBitmap(rendered, button.ClientRectangle);
@@ -113,12 +142,14 @@ internal static class TaskbarVerification
             Check(matching > image.Width * image.Height * 0.75, "실제 화면에서도 버튼 내용이 가려지지 않고 표시");
         }
         Invoke(badge, "MarkStale");
-        Check(button.Text == "5시간 73% !\n주간 54% !", "조회 실패 시 마지막 확인값과 실패 표시 유지");
-        Invoke(badge, "Update", "5시간 73%\n주간 54%");
+        Check(button.Text == "Codex 5시간 73% ! (245분) · 주간 54% ! (59시간)\n"
+            + "Go 5시간 98% ! (142분) · 주간 100% ! (155시간) · 월간 27% ! (10일 19시간)",
+            "조회 실패 시 마지막 확인값과 실패 표시 유지");
+        Invoke(badge, "Update", Rows(("Codex", new object?[] { Cell("5시간", 73, "(245분)"), Cell("주간", 54, "(59시간)"), null })));
         Check(!button.Text.Contains('!'), "조회 성공 시 실패 표시 해제");
         button.Dispose();
         Wait(() => Button(badge) is { IsDisposed: false, Visible: true } replacement && !ReferenceEquals(replacement, button));
-        Check(Button(badge)!.Text == "5시간 73%\n주간 54%", "표시 창 재생성 시 잔여량 유지");
+        Check(Button(badge)!.Text == "Codex 5시간 73% (245분) · 주간 54% (59시간)", "표시 창 재생성 시 잔여량 유지");
         Check(ReferenceEquals(Button(badge)!.ContextMenuStrip, menu), "표시 창 재생성 시 공유 메뉴 유지");
         var handle = Button(badge)!.Handle;
         badge.Dispose();
@@ -139,7 +170,8 @@ internal static class TaskbarVerification
             var badge = (IDisposable)type.GetField("taskbarBadge", Flags)!.GetValue(form)!;
             Wait(() => Button(badge) is { Visible: true });
             Wait(() => !(bool)type.GetField("refreshing", Flags)!.GetValue(form)!);
-            var percent = (Label)type.GetField("primaryPercent", Flags)!.GetValue(form)!;
+            var row = type.GetField("codexPrimary", Flags)!.GetValue(form)!;
+            var percent = (Label)row.GetType().GetProperty("Percent", BindingFlags.NonPublic | BindingFlags.Instance)!.GetValue(row)!;
             Check(percent.Text.EndsWith('%') && Button(badge)!.Text.Contains(percent.Text), "메인 창 실제 잔여량과 작업표시줄 값 일치");
             Check(form.DeviceDpi == (int)GetDpiForWindow(form.Handle), "버튼 생성 후 메인 창 DPI 유지");
             form.Hide();
@@ -228,6 +260,24 @@ internal static class TaskbarVerification
 
     private static Point? Find(Rectangle bounds, Rectangle[] occupied, Size size)
         => (Point?)Badge.GetMethod("FindSpace", Flags)!.Invoke(null, new object[] { bounds, occupied, size, 6 });
+    private static readonly Type CellType = Badge.GetNestedType("Cell", Flags)!;
+    private static readonly Type RowType = Badge.GetNestedType("Row", Flags)!;
+
+    private static object Cell(string label, int remaining, string reset)
+        => Activator.CreateInstance(CellType, new object[] { label, remaining, reset })!;
+
+    private static object Rows(params (string Service, object?[] Cells)[] rows)
+    {
+        var cellList = typeof(List<>).MakeGenericType(CellType);
+        var rowList = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(RowType))!;
+        foreach (var (service, cells) in rows)
+        {
+            var list = (IList)Activator.CreateInstance(cellList)!;
+            foreach (var cell in cells) list.Add(cell);
+            rowList.Add(Activator.CreateInstance(RowType, new object?[] { service, list })!);
+        }
+        return rowList;
+    }
     private static Button? Button(IDisposable badge) => (Button?)Badge.GetField("button", Flags)!.GetValue(badge);
     private static void Invoke(IDisposable badge, string method, params object[] args) => Badge.GetMethod(method, Flags)!.Invoke(badge, args);
     private static void Wait(Func<bool> condition)

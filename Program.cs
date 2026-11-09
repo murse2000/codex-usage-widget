@@ -20,16 +20,21 @@ internal sealed class UsageForm : GlassForm
     private static readonly Color Muted = Color.FromArgb(89, 108, 134);
     private static readonly Color TextColor = Color.FromArgb(31, 45, 67);
     private static readonly Color Accent = Color.FromArgb(18, 137, 105);
+    private static readonly Color BrandColor = Color.FromArgb(53, 102, 195);
+    private const int SectionTop = 31;
+    private const int FirstRowGap = 19;
+    private const int RowPitch = 55;
+    private const int GroupGap = 12;
     private readonly IconButton refreshButton = new(IconButton.Icon.Refresh);
-    private readonly Label primaryName = new();
-    private readonly Label primaryPercent = new();
-    private readonly RemainingBar primaryBar = new();
-    private readonly Label primaryReset = new();
-    private readonly Label secondaryName = new();
-    private readonly Label secondaryPercent = new();
-    private readonly RemainingBar secondaryBar = new();
-    private readonly Label secondaryResetCaption = new();
-    private readonly Label secondaryReset = new();
+    private readonly UsageRow codexPrimary = new();
+    private readonly UsageRow codexSecondary = new();
+    private readonly UsageRow goRolling = new();
+    private readonly UsageRow goWeekly = new();
+    private readonly UsageRow goMonthly = new();
+    private readonly Label codexSection = new() { Text = "CODEX" };
+    private readonly Label goSection = new() { Text = "OPENCODE GO" };
+    private readonly Panel codexRule = new();
+    private readonly Panel goRule = new();
     private readonly Label status = new();
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 180_000 };
     private readonly System.Windows.Forms.Timer tiboTimer = new() { Interval = 120_000 };
@@ -37,14 +42,21 @@ internal sealed class UsageForm : GlassForm
     private readonly ToolStripMenuItem updateStatus = new($"현재 v{AppUpdate.CurrentVersion.ToString(3)}") { Enabled = false };
     private readonly ToolStripMenuItem updateCheck = new("업데이트 확인");
     private readonly HttpClient tiboClient = new() { Timeout = TimeSpan.FromSeconds(15), MaxResponseContentBufferSize = 262144 };
+    private readonly HttpClient goClient = new(new HttpClientHandler { AllowAutoRedirect = false })
+        { Timeout = TimeSpan.FromSeconds(15), MaxResponseContentBufferSize = OpenCodeGoUsage.MaximumResponseSize };
     private readonly ToolStripMenuItem tiboStatus = new("아직 확인하지 않음") { Enabled = false };
     private readonly ToolStripMenuItem tiboOriginal = new("최근 예고·관찰 X 원문") { Enabled = false };
     private readonly NotifyIcon tray = new() { Text = "Codex 사용량" };
     private readonly TaskbarBadge taskbarBadge;
     private readonly WidgetSettings settings = LoadSettings();
     private static readonly string SettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageWidget", "settings.json");
+    private string? goApiKey;
+    private IReadOnlyList<GoUsageWindow>? goWindows;
+    private UsageSnapshot? codexUsage;
+    private bool codexStale;
+    private bool goStale;
+    private bool goAuthFailed;
     private bool refreshing;
-    private bool hasSecondary;
     private bool checkingTibo;
     private DateTimeOffset nextTiboCheck;
     private TiboNotice? tiboNotice;
@@ -65,6 +77,7 @@ internal sealed class UsageForm : GlassForm
         ShowInTaskbar = false;
         ClientSize = new Size(252, 158);
         ForeColor = TextColor;
+        goApiKey = SecretStore.Unprotect(settings.OpenCodeGoKey);
         BuildUi();
         ResumeLayout(true);
         BuildTrayMenu();
@@ -87,6 +100,7 @@ internal sealed class UsageForm : GlassForm
             tiboTimer.Stop();
             tiboTimer.Dispose();
             tiboClient.Dispose();
+            goClient.Dispose();
             updateTimer.Stop();
             updateTimer.Dispose();
             SystemEvents.DisplaySettingsChanged -= DisplaySettingsChanged;
@@ -108,12 +122,9 @@ internal sealed class UsageForm : GlassForm
         Controls.Add(header);
         header.MouseDown += DragWindow;
 
-        var brand = new Label { Text = "CODEX", Font = new Font("Segoe UI", 8, FontStyle.Bold), ForeColor = Color.FromArgb(53, 102, 195), Location = new Point(14, 3), Size = new Size(54, 18), BackColor = Color.Transparent };
-        var heading = new Label { Text = "사용량", Font = new Font("Segoe UI", 8, FontStyle.Bold), ForeColor = Muted, Location = new Point(68, 3), Size = new Size(58, 18), BackColor = Color.Transparent };
+        var brand = new Label { Text = "사용량", Font = new Font("Segoe UI", 9, FontStyle.Bold), ForeColor = TextColor, Location = new Point(14, 2), Size = new Size(80, 19), BackColor = Color.Transparent };
         header.Controls.Add(brand);
-        header.Controls.Add(heading);
         brand.MouseDown += DragWindow;
-        heading.MouseDown += DragWindow;
 
         StyleButton(refreshButton, new Point(202, 2), new Size(20, 20));
         refreshButton.Click += async (_, _) => await RefreshUsageAsync();
@@ -131,44 +142,14 @@ internal sealed class UsageForm : GlassForm
         close.Click += (_, _) => Hide();
         header.Controls.Add(close);
 
-        primaryName.SetBounds(15, 44, 120, 19);
-        primaryName.Font = new Font("Segoe UI", 8.5f);
-        primaryName.ForeColor = Muted;
-        Controls.Add(primaryName);
+        AddSection(codexSection, codexRule, BrandColor);
+        AddRow(codexPrimary);
+        AddRow(codexSecondary);
+        AddSection(goSection, goRule, Accent);
+        AddRow(goRolling);
+        AddRow(goWeekly);
+        AddRow(goMonthly);
 
-        primaryPercent.SetBounds(130, 38, 106, 35);
-        primaryPercent.TextAlign = ContentAlignment.MiddleRight;
-        primaryPercent.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        primaryPercent.Font = new Font("Segoe UI", 20, FontStyle.Bold);
-        primaryPercent.ForeColor = TextColor;
-        Controls.Add(primaryPercent);
-
-        primaryBar.SetBounds(15, 77, 221, 5);
-        primaryBar.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        Controls.Add(primaryBar);
-        AddReset(primaryReset, new Label(), 94);
-
-        secondaryName.SetBounds(15, 132, 120, 19);
-        secondaryName.Font = new Font("Segoe UI", 8.5f);
-        secondaryName.ForeColor = Muted;
-        secondaryName.Visible = false;
-        Controls.Add(secondaryName);
-
-        secondaryPercent.SetBounds(130, 126, 106, 35);
-        secondaryPercent.TextAlign = ContentAlignment.MiddleRight;
-        secondaryPercent.Anchor = AnchorStyles.Top | AnchorStyles.Right;
-        secondaryPercent.Font = new Font("Segoe UI", 20, FontStyle.Bold);
-        secondaryPercent.ForeColor = TextColor;
-        secondaryPercent.Visible = false;
-        Controls.Add(secondaryPercent);
-
-        secondaryBar.SetBounds(15, 165, 221, 5);
-        secondaryBar.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
-        secondaryBar.Visible = false;
-        Controls.Add(secondaryBar);
-        AddReset(secondaryReset, secondaryResetCaption, 182);
-
-        status.SetBounds(15, 133, 221, 16);
         status.Font = new Font("Segoe UI", 7.5f);
         status.AutoSize = true;
         status.ForeColor = Muted;
@@ -176,28 +157,46 @@ internal sealed class UsageForm : GlassForm
         foreach (var label in Controls.OfType<Label>()) label.BackColor = Color.Transparent;
     }
 
+    private void AddSection(Label label, Panel rule, Color color)
+    {
+        label.Font = new Font("Segoe UI", 7.5f, FontStyle.Bold);
+        label.ForeColor = color;
+        label.AutoSize = true;
+        rule.Height = LogicalToDeviceUnits(1);
+        rule.BackColor = Color.FromArgb(206, 220, 238);
+        Controls.Add(label);
+        Controls.Add(rule);
+        label.Visible = false;
+        rule.Visible = false;
+    }
+
+    private void AddRow(UsageRow row)
+    {
+        row.Name.Font = new Font("Segoe UI", 8.5f);
+        row.Name.ForeColor = Muted;
+        row.Percent.TextAlign = ContentAlignment.MiddleRight;
+        row.Percent.Font = new Font("Segoe UI", 16, FontStyle.Bold);
+        row.Percent.ForeColor = TextColor;
+        row.ResetCaption.Text = "초기화";
+        row.ResetCaption.Font = new Font("Segoe UI", 8);
+        row.ResetCaption.ForeColor = Muted;
+        row.ResetCaption.AutoSize = true;
+        row.Reset.Font = new Font("Segoe UI", 7.5f);
+        row.Reset.ForeColor = TextColor;
+        row.Reset.AutoSize = true;
+        Controls.Add(row.Name);
+        Controls.Add(row.Percent);
+        Controls.Add(row.Bar);
+        Controls.Add(row.ResetCaption);
+        Controls.Add(row.Reset);
+        row.Shown = false;
+    }
+
     private static Icon LoadIcon()
     {
         using var stream = typeof(UsageForm).Assembly.GetManifestResourceStream("CodexUsageWidget.Widget.ico")!;
         using var icon = new Icon(stream);
         return (Icon)icon.Clone();
-    }
-
-    private void AddReset(Label label, Label caption, int top)
-    {
-        caption.Text = "초기화";
-        caption.Font = new Font("Segoe UI", 8);
-        caption.ForeColor = Muted;
-        caption.Location = new Point(15, top);
-        caption.AutoSize = true;
-        caption.Visible = top < 120;
-        label.Font = new Font("Segoe UI", 7.5f);
-        label.ForeColor = TextColor;
-        label.Location = new Point(58, top - 1);
-        label.AutoSize = true;
-        label.Visible = top < 120;
-        Controls.Add(caption);
-        Controls.Add(label);
     }
 
     private void StyleButton(Button button, Point location, Size size, float fontSize = 9)
@@ -258,37 +257,29 @@ internal sealed class UsageForm : GlassForm
         status.Text = "확인 중…";
         try
         {
-            var usage = await Task.Run(ReadUsage);
+            var codexTask = settings.ShowCodex
+                ? Task.Run(FetchCodex)
+                : Task.FromResult(FetchResult<UsageSnapshot>.Empty);
+            var goTask = settings.ShowOpenCodeGo && goApiKey is { } apiKey
+                ? FetchGoAsync(apiKey)
+                : Task.FromResult(FetchResult<IReadOnlyList<GoUsageWindow>>.Empty);
+            await Task.WhenAll(codexTask, goTask);
             if (IsDisposed) return;
-            SetWindow(primaryName, primaryPercent, primaryBar, primaryReset, usage.Primary);
-            hasSecondary = usage.Secondary is not null;
-            if (usage.Secondary is { } secondary)
-            {
-                SetWindow(secondaryName, secondaryPercent, secondaryBar, secondaryReset, secondary);
-                secondaryName.Visible = secondaryPercent.Visible = secondaryBar.Visible = secondaryResetCaption.Visible = secondaryReset.Visible = true;
-            }
-            else
-            {
-                secondaryName.Visible = secondaryPercent.Visible = secondaryBar.Visible = secondaryResetCaption.Visible = secondaryReset.Visible = false;
-            }
+
             var alerts = new List<string>();
-            foreach (var window in new[] { usage.Primary, usage.Secondary }.OfType<UsageWindow>())
-            {
-                var threshold = RecordAlert(settings, window);
-                if (threshold > 0) alerts.Add($"{WindowName(window.DurationMinutes)} 잔여량이 {threshold}% 미만입니다. (현재 {100 - Math.Clamp(window.UsedPercent, 0, 100)}%)");
-            }
-            var updateText = "3분마다 갱신 · " + DateTime.Now.ToString("HH:mm");
-            status.Text = updateText;
+            if (settings.ShowCodex) ApplyCodex(codexTask.Result, alerts);
+            if (settings.ShowOpenCodeGo) ApplyGo(goTask.Result, alerts);
+
+            status.Text = StatusText();
             FitUsageLayout();
             KeepOnScreen(Screen.FromControl(this));
             var settingsSaved = SavePosition();
-            if (alerts.Count > 0) tray.ShowBalloonTip(10000, "Codex 잔여량 알림", string.Join("\n", alerts), ToolTipIcon.Warning);
-            tray.Text = $"Codex · {primaryName.Text} {primaryPercent.Text}";
-            taskbarBadge.Update($"{WindowName(usage.Primary.DurationMinutes).Replace(" 한도", "")} {100 - Math.Clamp(usage.Primary.UsedPercent, 0, 100)}% · {ResetRemainingText(usage.Primary)}\n"
-                + (usage.Secondary is { } second ? $"{WindowName(second.DurationMinutes).Replace(" 한도", "")} {100 - Math.Clamp(second.UsedPercent, 0, 100)}% · {ResetRemainingText(second)}" : "Codex 잔여량"));
+            if (alerts.Count > 0) tray.ShowBalloonTip(10000, "사용량 알림", string.Join("\n", alerts), ToolTipIcon.Warning);
+            UpdateTrayText();
+            taskbarBadge.Update(TaskbarRows());
             if (!settingsSaved)
             {
-                status.Text = updateText + " · 설정 저장 실패";
+                status.Text = StatusText() + " · 설정 저장 실패";
                 FitUsageLayout();
             }
         }
@@ -296,7 +287,12 @@ internal sealed class UsageForm : GlassForm
         {
             if (!IsDisposed)
             {
+                codexStale = goStale = true;
+                RenderCodex();
+                RenderGo();
                 status.Text = "갱신 실패 · " + DateTime.Now.ToString("HH:mm");
+                FitUsageLayout();
+                UpdateTrayText();
                 taskbarBadge.MarkStale();
             }
         }
@@ -307,30 +303,205 @@ internal sealed class UsageForm : GlassForm
         }
     }
 
-    private static void SetWindow(Label name, Label percent, RemainingBar bar, Label reset, UsageWindow window)
+    private sealed class FetchResult<T>
     {
-        var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
-        name.Text = WindowName(window.DurationMinutes) + " 남음";
-        percent.Text = $"{remaining}%";
-        percent.ForeColor = RemainingColor(remaining);
-        bar.Remaining = remaining;
-        bar.Invalidate();
-        var resetAt = DateTimeOffset.FromUnixTimeSeconds(window.ResetsAt);
+        internal FetchResult(T? value, Exception? error) { Value = value; Error = error; }
+        internal T? Value { get; }
+        internal Exception? Error { get; }
+        internal static FetchResult<T> Empty { get; } = new(default, null);
+    }
+
+    private static FetchResult<UsageSnapshot> FetchCodex()
+    {
+        try { return new(ReadUsage(), null); }
+        catch (Exception error) { return new(default, error); }
+    }
+
+    private async Task<FetchResult<IReadOnlyList<GoUsageWindow>>> FetchGoAsync(string apiKey)
+    {
+        try { return new(await OpenCodeGoUsage.ReadAsync(goClient, apiKey).ConfigureAwait(false), null); }
+        catch (Exception error) { return new(default, error); }
+    }
+
+    private void ApplyCodex(FetchResult<UsageSnapshot> result, List<string> alerts)
+    {
+        if (result.Value is { } usage)
+        {
+            codexUsage = usage;
+            codexStale = false;
+            foreach (var window in new[] { usage.Primary, usage.Secondary }.OfType<UsageWindow>())
+            {
+                var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
+                var threshold = RecordAlert(settings, $"codex:{window.DurationMinutes}", remaining, window.ResetsAt);
+                if (threshold > 0) alerts.Add($"{WindowName(window.DurationMinutes)} 잔여량이 {threshold}% 미만입니다. (현재 {remaining}%)");
+            }
+        }
+        else if (result.Error is not null)
+        {
+            codexStale = true;
+        }
+        RenderCodex();
+    }
+
+    private void ApplyGo(FetchResult<IReadOnlyList<GoUsageWindow>> result, List<string> alerts)
+    {
+        if (result.Value is { } windows)
+        {
+            goWindows = windows;
+            goStale = false;
+            goAuthFailed = false;
+            foreach (var window in windows)
+            {
+                var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
+                var threshold = RecordAlert(settings, $"go:{window.Key}", remaining, window.ResetsAt);
+                if (threshold > 0) alerts.Add($"OpenCode Go {window.Label} 잔여량이 {threshold}% 미만입니다. (현재 {remaining}%)");
+            }
+        }
+        else if (result.Error is OpenCodeGoAuthException)
+        {
+            // 인증되지 않은 키는 목록에 남기지 않는다.
+            goWindows = null;
+            goAuthFailed = true;
+            goStale = false;
+        }
+        else if (result.Error is not null)
+        {
+            goStale = true;
+        }
+        RenderGo();
+    }
+
+    private void RenderCodex()
+    {
+        if (codexUsage is not { } usage) return;
+        SetRow(codexPrimary, WindowName(usage.Primary.DurationMinutes) + " 남음", usage.Primary, codexStale);
+        if (usage.Secondary is { } secondary)
+            SetRow(codexSecondary, WindowName(secondary.DurationMinutes) + " 남음", secondary, codexStale);
+    }
+
+    private void RenderGo()
+    {
+        if (goWindows is not { } windows) return;
+        foreach (var window in windows)
+        {
+            var row = window.Key switch
+            {
+                "rolling" => goRolling,
+                "weekly" => goWeekly,
+                "monthly" => goMonthly,
+                _ => null
+            };
+            if (row is not null) SetRow(row, window.Label + " 남음", window.UsedPercent, window.ResetsAt, window.WindowMinutes, goStale);
+        }
+    }
+
+    private static void SetRow(UsageRow row, string name, UsageWindow window, bool stale)
+        => SetRow(row, name, window.UsedPercent, window.ResetsAt, window.DurationMinutes, stale);
+
+    private static void SetRow(UsageRow row, string name, int usedPercent, long resetsAt, int windowMinutes, bool stale)
+    {
+        var remaining = 100 - Math.Clamp(usedPercent, 0, 100);
+        row.Name.Text = name;
+        row.Percent.Text = $"{remaining}%{(stale ? " !" : "")}";
+        row.Percent.ForeColor = RemainingColor(remaining);
+        row.Bar.Remaining = remaining;
+        row.Bar.Stale = stale;
+        row.Bar.Invalidate();
+        var resetAt = DateTimeOffset.FromUnixTimeSeconds(resetsAt);
         var timeLeft = resetAt - DateTimeOffset.Now;
         if (timeLeft < TimeSpan.Zero) timeLeft = TimeSpan.Zero;
-        var remainingText = ResetRemainingText(window, timeLeft);
-        reset.Text = $"{resetAt.LocalDateTime:M/d HH:mm} ({remainingText})";
+        row.Reset.Text = $"{resetAt.LocalDateTime:M/d HH:mm} ({RemainingText(windowMinutes, timeLeft)})";
     }
 
-    private static string ResetRemainingText(UsageWindow window)
-    {
-        var timeLeft = DateTimeOffset.FromUnixTimeSeconds(window.ResetsAt) - DateTimeOffset.Now;
-        return ResetRemainingText(window, timeLeft < TimeSpan.Zero ? TimeSpan.Zero : timeLeft);
-    }
-
-    private static string ResetRemainingText(UsageWindow window, TimeSpan timeLeft) => window.DurationMinutes == 300
+    private static string RemainingText(int windowMinutes, TimeSpan timeLeft) => windowMinutes == 300
         ? $"{(int)Math.Ceiling(timeLeft.TotalMinutes)}분 남음"
         : $"{(int)timeLeft.TotalDays}일 {timeLeft.Hours:00}시간 남음";
+
+    private string StatusText()
+    {
+        if (!settings.ShowCodex && !settings.ShowOpenCodeGo) return "표시할 서비스가 없습니다 · 설정에서 선택";
+        var text = "3분마다 갱신 · " + DateTime.Now.ToString("HH:mm");
+        if (settings.ShowCodex && codexStale) text += " · Codex 실패";
+        if (settings.ShowOpenCodeGo && goAuthFailed) text += " · Go 키 인증 실패";
+        else if (settings.ShowOpenCodeGo && goStale) text += " · Go 조회 실패";
+        return text;
+    }
+
+    private void UpdateTrayText()
+    {
+        var parts = new List<string>();
+        if (settings.ShowCodex && codexUsage is { } usage)
+            parts.Add($"{100 - Math.Clamp(usage.Primary.UsedPercent, 0, 100)}%");
+        if (settings.ShowOpenCodeGo && goWindows is { Count: > 0 } windows)
+        {
+            var lowest = windows.OrderBy(window => 100 - Math.Clamp(window.UsedPercent, 0, 100)).First();
+            parts.Add($"Go {100 - Math.Clamp(lowest.UsedPercent, 0, 100)}%");
+        }
+        tray.Text = parts.Count == 0 ? "Codex 사용량" : "Codex 사용량 · " + string.Join(" · ", parts);
+    }
+
+    /// <summary>
+    /// 작업표시줄에는 서비스마다 한 줄씩, 5시간·주간·월간 순서의 열을 맞춰 표시한다.
+    /// </summary>
+    private IReadOnlyList<TaskbarBadge.Row> TaskbarRows()
+    {
+        var rows = new List<TaskbarBadge.Row>();
+        if (settings.ShowCodex && codexUsage is { } usage)
+        {
+            rows.Add(new TaskbarBadge.Row("Codex", new[]
+            {
+                BadgeCell(usage.Primary),
+                usage.Secondary is { } secondary ? BadgeCell(secondary) : null,
+                null
+            }));
+        }
+        if (settings.ShowOpenCodeGo && goWindows is { Count: > 0 } windows)
+        {
+            rows.Add(new TaskbarBadge.Row("Go", new[]
+            {
+                GoBadgeCell(windows, "rolling"),
+                GoBadgeCell(windows, "weekly"),
+                GoBadgeCell(windows, "monthly")
+            }));
+        }
+        // 서비스가 하나만 남아도 한 줄에 큰 글자로 늘어나지 않도록 첫 구간과 나머지를 두 줄로 나눈다.
+        if (rows.Count != 1) return rows;
+        var only = rows[0];
+        var cells = only.Cells.Where(cell => cell is not null).Select(cell => cell!).ToList();
+        if (cells.Count < 2) return rows;
+        return new[]
+        {
+            new TaskbarBadge.Row(only.Service, new TaskbarBadge.Cell?[] { cells[0], null, null }),
+            new TaskbarBadge.Row(string.Empty, cells.Skip(1).Cast<TaskbarBadge.Cell?>().ToArray())
+        };
+    }
+
+    private static TaskbarBadge.Cell BadgeCell(UsageWindow window)
+        => new(WindowName(window.DurationMinutes).Replace(" 한도", ""), 100 - Math.Clamp(window.UsedPercent, 0, 100),
+            BadgeResetText(window.DurationMinutes, ResetLeft(window.ResetsAt)));
+
+    private static TaskbarBadge.Cell? GoBadgeCell(IReadOnlyList<GoUsageWindow> windows, string key)
+        => windows.Where(window => window.Key == key)
+            .Select(window => (TaskbarBadge.Cell?)new TaskbarBadge.Cell(window.Label.Replace(" 한도", ""),
+                100 - Math.Clamp(window.UsedPercent, 0, 100),
+                BadgeResetText(window.WindowMinutes, ResetLeft(window.ResetsAt))))
+            .FirstOrDefault();
+
+    /// <summary>작업표시줄에서는 초기화까지 남은 시간을 괄호로 짧게 적는다.</summary>
+    private static string BadgeResetText(int windowMinutes, TimeSpan timeLeft) => windowMinutes switch
+    {
+        300 => $"({(int)Math.Ceiling(timeLeft.TotalMinutes)}분)",
+        10080 => $"({(int)timeLeft.TotalHours}시간)",
+        _ => timeLeft >= TimeSpan.FromDays(1)
+            ? $"({(int)timeLeft.TotalDays}일 {timeLeft.Hours}시간)"
+            : $"({(int)Math.Ceiling(timeLeft.TotalHours)}시간)"
+    };
+
+    private static TimeSpan ResetLeft(long resetsAt)
+    {
+        var left = DateTimeOffset.FromUnixTimeSeconds(resetsAt) - DateTimeOffset.Now;
+        return left < TimeSpan.Zero ? TimeSpan.Zero : left;
+    }
 
     private async Task RefreshTiboAsync()
     {
@@ -445,12 +616,87 @@ internal sealed class UsageForm : GlassForm
 
     private void FitUsageLayout()
     {
-        var baseSize = LogicalToDeviceUnits(new Size(252, hasSecondary ? 223 : 158));
-        var margin = LogicalToDeviceUnits(15);
-        var lastReset = hasSecondary ? secondaryReset : primaryReset;
-        status.Top = Math.Max(baseSize.Height - LogicalToDeviceUnits(25), lastReset.Bottom + LogicalToDeviceUnits(14));
-        ClientSize = new Size(Math.Max(baseSize.Width, Math.Max(status.Right, Math.Max(primaryReset.Right, hasSecondary ? secondaryReset.Right : 0)) + margin),
-            Math.Max(baseSize.Height, status.Bottom + LogicalToDeviceUnits(9)));
+        ApplyVisibility();
+        var width = LogicalToDeviceUnits(252);
+        foreach (var row in AllRows().Where(row => row.Shown))
+            width = Math.Max(width, LogicalToDeviceUnits(58) + row.Reset.PreferredWidth + LogicalToDeviceUnits(15));
+
+        var y = LogicalToDeviceUnits(SectionTop);
+        if (ShowCodexSection)
+        {
+            PlaceSection(codexSection, codexRule, y, width);
+            y += LogicalToDeviceUnits(FirstRowGap);
+            foreach (var row in CodexRows())
+            {
+                PlaceRow(row, y, width);
+                y += RowStep(row, y);
+            }
+            if (ShowGoSection) y += LogicalToDeviceUnits(GroupGap);
+        }
+        if (ShowGoSection)
+        {
+            PlaceSection(goSection, goRule, y, width);
+            y += LogicalToDeviceUnits(FirstRowGap);
+            foreach (var row in GoRows())
+            {
+                PlaceRow(row, y, width);
+                y += RowStep(row, y);
+            }
+        }
+
+        var bottom = AllRows().Where(row => row.Shown).Select(row => row.Reset.Bottom).DefaultIfEmpty(y).Max();
+        status.Location = new Point(LogicalToDeviceUnits(15), Math.Max(Math.Max(y, bottom) + LogicalToDeviceUnits(8), LogicalToDeviceUnits(SectionTop + 6)));
+        ClientSize = new Size(Math.Max(width, status.Right + LogicalToDeviceUnits(15)), status.Bottom + LogicalToDeviceUnits(9));
+    }
+
+    private int RowStep(UsageRow row, int top)
+        => Math.Max(LogicalToDeviceUnits(RowPitch), row.Reset.Bottom - top + LogicalToDeviceUnits(6));
+
+    private bool ShowCodexSection => settings.ShowCodex && codexUsage is not null;
+    private bool ShowGoSection => settings.ShowOpenCodeGo && goWindows is not null;
+
+    private void ApplyVisibility()
+    {
+        var codex = ShowCodexSection;
+        var go = ShowGoSection;
+        codexSection.Visible = codexRule.Visible = codex;
+        goSection.Visible = goRule.Visible = go;
+        codexPrimary.Shown = codex;
+        codexSecondary.Shown = codex && codexUsage?.Secondary is not null;
+        goRolling.Shown = go && HasGo("rolling");
+        goWeekly.Shown = go && HasGo("weekly");
+        goMonthly.Shown = go && HasGo("monthly");
+    }
+
+    private bool HasGo(string key) => goWindows?.Any(window => window.Key == key) == true;
+
+    private IEnumerable<UsageRow> AllRows()
+    {
+        yield return codexPrimary;
+        yield return codexSecondary;
+        yield return goRolling;
+        yield return goWeekly;
+        yield return goMonthly;
+    }
+
+    private IEnumerable<UsageRow> CodexRows() => new[] { codexPrimary, codexSecondary }.Where(row => row.Shown);
+
+    private IEnumerable<UsageRow> GoRows() => new[] { goRolling, goWeekly, goMonthly }.Where(row => row.Shown);
+
+    private void PlaceSection(Label label, Panel rule, int top, int width)
+    {
+        label.Location = new Point(LogicalToDeviceUnits(15), top);
+        var left = LogicalToDeviceUnits(15) + label.PreferredWidth + LogicalToDeviceUnits(8);
+        rule.SetBounds(left, top + LogicalToDeviceUnits(7), Math.Max(0, width - left - LogicalToDeviceUnits(15)), LogicalToDeviceUnits(1));
+    }
+
+    private void PlaceRow(UsageRow row, int top, int width)
+    {
+        row.Name.SetBounds(LogicalToDeviceUnits(15), top, LogicalToDeviceUnits(110), LogicalToDeviceUnits(19));
+        row.Percent.SetBounds(LogicalToDeviceUnits(126), top - LogicalToDeviceUnits(7), Math.Max(LogicalToDeviceUnits(40), width - LogicalToDeviceUnits(141)), LogicalToDeviceUnits(30));
+        row.Bar.SetBounds(LogicalToDeviceUnits(15), top + LogicalToDeviceUnits(23), Math.Max(LogicalToDeviceUnits(40), width - LogicalToDeviceUnits(30)), LogicalToDeviceUnits(5));
+        row.ResetCaption.Location = new Point(LogicalToDeviceUnits(15), top + LogicalToDeviceUnits(33));
+        row.Reset.Location = new Point(LogicalToDeviceUnits(58), top + LogicalToDeviceUnits(32));
     }
 
     private static string WindowName(int minutes) => minutes switch
@@ -550,12 +796,10 @@ internal sealed class UsageForm : GlassForm
         ? Color.FromArgb(199, 58, 69)
         : remaining < 30 ? Color.FromArgb(173, 109, 20) : Accent;
 
-    private static int RecordAlert(WidgetSettings settings, UsageWindow window)
+    private static int RecordAlert(WidgetSettings settings, string key, int remaining, long resetsAt)
     {
-        var key = window.DurationMinutes.ToString();
-        if (!settings.Alerts.TryGetValue(key, out var state) || state.ResetsAt != window.ResetsAt)
-            settings.Alerts[key] = state = new AlertState { ResetsAt = window.ResetsAt };
-        var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
+        if (!settings.Alerts.TryGetValue(key, out var state) || state.ResetsAt != resetsAt)
+            settings.Alerts[key] = state = new AlertState { ResetsAt = resetsAt };
         var level = remaining < 10 ? 2 : remaining < 30 ? 1 : 0;
         if (level <= state.Level) return 0;
         state.Level = level;
@@ -569,6 +813,16 @@ internal sealed class UsageForm : GlassForm
         menu.Items.Add(toggle);
         menu.Items.Add("새로고침", null, async (_, _) => await RefreshUsageAsync());
         menu.Items.Add("위젯 설정", null, (_, _) => { ShowWidget(); ShowOpacityPicker(); });
+        var services = new ToolStripMenuItem("표시 서비스");
+        var codexItem = new ToolStripMenuItem("Codex") { CheckOnClick = true, Checked = settings.ShowCodex };
+        codexItem.CheckedChanged += (_, _) => SetService(codex: codexItem.Checked);
+        var goItem = new ToolStripMenuItem("OpenCode Go") { CheckOnClick = true, Checked = settings.ShowOpenCodeGo };
+        goItem.CheckedChanged += (_, _) => SetService(go: goItem.Checked);
+        services.DropDownItems.Add(codexItem);
+        services.DropDownItems.Add(goItem);
+        services.DropDownItems.Add(new ToolStripSeparator());
+        services.DropDownItems.Add("OpenCode Go API 키…", null, (_, _) => { ShowWidget(); ShowOpacityPicker(); });
+        menu.Items.Add(services);
         var monitors = new ToolStripMenuItem("표시 모니터");
         menu.Items.Add(monitors);
         var tibo = new ToolStripMenuItem("Tibo 리셋 예고");
@@ -605,6 +859,8 @@ internal sealed class UsageForm : GlassForm
         menu.Opening += (_, _) =>
         {
             toggle.Text = Visible ? "위젯 숨기기" : "위젯 보이기";
+            if (codexItem.Checked != settings.ShowCodex) codexItem.Checked = settings.ShowCodex;
+            if (goItem.Checked != settings.ShowOpenCodeGo) goItem.Checked = settings.ShowOpenCodeGo;
             while (monitors.DropDownItems.Count > 0) monitors.DropDownItems[0].Dispose();
             foreach (var screen in Screen.AllScreens)
             {
@@ -688,7 +944,12 @@ internal sealed class UsageForm : GlassForm
     {
         try
         {
-            return File.Exists(SettingsPath) ? JsonSerializer.Deserialize<WidgetSettings>(File.ReadAllText(SettingsPath)) ?? new() : new();
+            if (!File.Exists(SettingsPath)) return new();
+            var settings = JsonSerializer.Deserialize<WidgetSettings>(File.ReadAllText(SettingsPath)) ?? new();
+            // 알림 키에 서비스 접두사를 붙이기 전에 저장된 기록을 옮긴다.
+            foreach (var legacy in new[] { "300", "10080" })
+                if (settings.Alerts.Remove(legacy, out var state)) settings.Alerts["codex:" + legacy] = state;
+            return settings;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
         {
@@ -703,6 +964,9 @@ internal sealed class UsageForm : GlassForm
         public int? Y { get; set; }
         public double Opacity { get; set; } = 1;
         public bool AlwaysOnTop { get; set; } = true;
+        public bool ShowCodex { get; set; } = true;
+        public bool ShowOpenCodeGo { get; set; } = true;
+        public string? OpenCodeGoKey { get; set; }
         public Dictionary<string, AlertState> Alerts { get; set; } = new();
         public bool TiboAlertsEnabled { get; set; } = true;
         public HashSet<string> TiboAlertKeys { get; set; } = new();
@@ -715,10 +979,80 @@ internal sealed class UsageForm : GlassForm
         public int Level { get; set; }
     }
 
+    private void SetService(bool? codex = null, bool? go = null)
+    {
+        if (codex is { } codexValue) settings.ShowCodex = codexValue;
+        if (go is { } goValue) settings.ShowOpenCodeGo = goValue;
+        SavePosition();
+        status.Text = StatusText();
+        FitUsageLayout();
+        UpdateTrayText();
+        taskbarBadge.Update(TaskbarRows());
+        if ((codex == true && codexUsage is null) || (go == true && goWindows is null)) _ = RefreshUsageAsync();
+    }
+
+    private string GoKeyStatusText()
+    {
+        if (goApiKey is null) return "키 없음 · OpenCode Go 숨김";
+        if (goAuthFailed) return "인증되지 않은 키 · OpenCode Go 숨김";
+        if (goWindows is null) return "키 저장됨 · 확인 대기";
+        return "인증 확인 · " + DateTime.Now.ToString("HH:mm");
+    }
+
+    private async Task<string?> SaveGoKeyAsync(string value)
+    {
+        if (value.Length == 0) return "키를 입력하세요.";
+        IReadOnlyList<GoUsageWindow> windows;
+        try
+        {
+            windows = await OpenCodeGoUsage.ReadAsync(goClient, value);
+        }
+        catch (OpenCodeGoAuthException)
+        {
+            return "인증되지 않은 키입니다.";
+        }
+        catch (Exception error)
+        {
+            return "확인 실패 · " + error.Message;
+        }
+
+        var protectedKey = SecretStore.Protect(value);
+        if (protectedKey is null) return "키를 안전하게 저장하지 못했습니다.";
+        settings.OpenCodeGoKey = protectedKey;
+        goApiKey = value;
+        goAuthFailed = false;
+        goWindows = windows;
+        goStale = false;
+        if (!SavePosition()) return "설정 저장 실패";
+        RenderGo();
+        status.Text = StatusText();
+        FitUsageLayout();
+        UpdateTrayText();
+        taskbarBadge.Update(TaskbarRows());
+        return null;
+    }
+
+    private void ClearGoKey()
+    {
+        settings.OpenCodeGoKey = null;
+        goApiKey = null;
+        goWindows = null;
+        goAuthFailed = false;
+        goStale = false;
+        SavePosition();
+        status.Text = StatusText();
+        FitUsageLayout();
+        UpdateTrayText();
+        taskbarBadge.Update(TaskbarRows());
+    }
+
     private void ShowOpacityPicker()
     {
         var picker = new OpacityPicker(Opacity, value => { Opacity = value; SavePosition(); }, IsStartupEnabled(), SetStartupEnabled,
-            TopMost, value => { TopMost = settings.AlwaysOnTop = value; SavePosition(); });
+            TopMost, value => { TopMost = settings.AlwaysOnTop = value; SavePosition(); },
+            settings.ShowCodex, value => SetService(codex: value),
+            settings.ShowOpenCodeGo, value => SetService(go: value),
+            SaveGoKeyAsync, ClearGoKey, GoKeyStatusText());
         var area = Screen.FromControl(this).WorkingArea;
         var x = Math.Min(Right - picker.Width, area.Right - picker.Width - 8);
         var y = Bottom + 6;
@@ -763,9 +1097,26 @@ internal sealed class UsageForm : GlassForm
     private sealed record UsageWindow(int UsedPercent, int DurationMinutes, long ResetsAt);
     private sealed record UsageSnapshot(UsageWindow Primary, UsageWindow? Secondary);
 
+    private sealed class UsageRow
+    {
+        internal Label Name { get; } = new();
+        internal Label Percent { get; } = new();
+        internal RemainingBar Bar { get; } = new();
+        internal Label ResetCaption { get; } = new();
+        internal Label Reset { get; } = new();
+
+        /// <summary>목록에 포함되는지 여부. 부모 창이 숨겨져 있어도 레이아웃 계산에 쓰인다.</summary>
+        internal bool Shown
+        {
+            get => Name.Visible;
+            set => Name.Visible = Percent.Visible = Bar.Visible = ResetCaption.Visible = Reset.Visible = value;
+        }
+    }
+
     private sealed class RemainingBar : Control
     {
         public int Remaining { get; set; } = 100;
+        public bool Stale { get; set; }
 
         public RemainingBar()
         {
@@ -784,7 +1135,8 @@ internal sealed class UsageForm : GlassForm
             var width = (int)(ClientSize.Width * Math.Clamp(Remaining, 0, 100) / 100d);
             if (width > 0)
             {
-                using var brush = new SolidBrush(RemainingColor(Remaining));
+                var color = RemainingColor(Remaining);
+                using var brush = new SolidBrush(Stale ? Color.FromArgb(140, color) : color);
                 using var fill = GlassForm.RoundedRectangle(new RectangleF(0, 0, width, ClientSize.Height), ClientSize.Height / 2f);
                 e.Graphics.FillPath(brush, fill);
             }
@@ -797,9 +1149,14 @@ internal sealed class UsageForm : GlassForm
         private readonly Label valueLabel = new();
         private readonly CheckBox startupCheck = new();
         private readonly CheckBox topMostCheck = new();
+        private readonly CheckBox codexCheck = new();
+        private readonly CheckBox goCheck = new();
+        private readonly TextBox keyBox = new();
+        private readonly Label keyStatusLabel = new();
 
         public OpacityPicker(double current, Action<double> onChange, bool startupEnabled, Action<bool> onStartupChange,
-            bool alwaysOnTop, Action<bool> onTopMostChange)
+            bool alwaysOnTop, Action<bool> onTopMostChange, bool codexEnabled, Action<bool> onCodexChange,
+            bool goEnabled, Action<bool> onGoChange, Func<string, Task<string?>> onSaveKey, Action onClearKey, string keyStatusText)
         {
             SuspendLayout();
             AutoScaleDimensions = new SizeF(96, 96);
@@ -899,7 +1256,86 @@ internal sealed class UsageForm : GlassForm
                 }
             };
             layout.Controls.Add(startupCheck);
+
+            var servicesLabel = new Label { Text = "표시 서비스", Font = new Font("Segoe UI", 8, FontStyle.Bold), ForeColor = Muted,
+                AutoSize = true, BackColor = Color.Transparent, Margin = new Padding(0, 14, 0, 5) };
+            layout.Controls.Add(servicesLabel);
+
+            codexCheck.Text = "Codex";
+            StyleCheck(codexCheck, codexEnabled);
+            codexCheck.CheckedChanged += (_, _) => onCodexChange(codexCheck.Checked);
+            layout.Controls.Add(codexCheck);
+
+            goCheck.Text = "OpenCode Go";
+            StyleCheck(goCheck, goEnabled);
+            goCheck.Margin = new Padding(0, 0, 0, 12);
+            goCheck.CheckedChanged += (_, _) => onGoChange(goCheck.Checked);
+            layout.Controls.Add(goCheck);
+
+            var keyLabel = new Label { Text = "OpenCode Go API 키", Font = new Font("Segoe UI", 8, FontStyle.Bold), ForeColor = Muted,
+                AutoSize = true, BackColor = Color.Transparent, Margin = new Padding(0, 0, 0, 4) };
+            layout.Controls.Add(keyLabel);
+
+            keyBox.Width = 210;
+            keyBox.Font = new Font("Segoe UI", 9);
+            keyBox.UseSystemPasswordChar = true;
+            keyBox.PlaceholderText = "oc_sk_…";
+            keyBox.AccessibleName = "OpenCode Go API 키";
+            keyBox.Margin = new Padding(0, 0, 0, 5);
+            layout.Controls.Add(keyBox);
+
+            var keyButtons = new FlowLayoutPanel { AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, WrapContents = false,
+                BackColor = Color.Transparent, Margin = new Padding(0, 0, 0, 5) };
+            var saveKey = new Button { Text = "키 저장", AutoSize = true, Padding = new Padding(8, 2, 8, 2), Margin = new Padding(0, 0, 6, 0) };
+            var clearKey = new Button { Text = "키 지우기", AutoSize = true, Padding = new Padding(8, 2, 8, 2), Margin = Padding.Empty };
+            keyButtons.Controls.Add(saveKey);
+            keyButtons.Controls.Add(clearKey);
+            layout.Controls.Add(keyButtons);
+
+            keyStatusLabel.Text = keyStatusText;
+            keyStatusLabel.Font = new Font("Segoe UI", 7.5f);
+            keyStatusLabel.ForeColor = Muted;
+            keyStatusLabel.AutoSize = true;
+            keyStatusLabel.BackColor = Color.Transparent;
+            keyStatusLabel.Margin = Padding.Empty;
+            keyStatusLabel.AccessibleName = "OpenCode Go 키 상태";
+            layout.Controls.Add(keyStatusLabel);
+
+            saveKey.Click += async (_, _) =>
+            {
+                saveKey.Enabled = false;
+                keyStatusLabel.Text = "확인 중…";
+                keyStatusLabel.ForeColor = Muted;
+                try
+                {
+                    var error = await onSaveKey(keyBox.Text.Trim());
+                    keyBox.Clear();
+                    keyStatusLabel.Text = error ?? "인증 확인 · 키 저장됨";
+                    keyStatusLabel.ForeColor = error is null ? Accent : Color.FromArgb(173, 109, 20);
+                }
+                finally
+                {
+                    saveKey.Enabled = true;
+                }
+            };
+            clearKey.Click += (_, _) =>
+            {
+                onClearKey();
+                keyBox.Clear();
+                keyStatusLabel.Text = "키 없음 · OpenCode Go 숨김";
+                keyStatusLabel.ForeColor = Muted;
+            };
             ResumeLayout(true);
+        }
+
+        private static void StyleCheck(CheckBox check, bool value)
+        {
+            check.Font = new Font("Segoe UI", 9);
+            check.ForeColor = TextColor;
+            check.BackColor = Color.Transparent;
+            check.AutoSize = true;
+            check.Margin = new Padding(0, 0, 0, 4);
+            check.Checked = value;
         }
     }
 

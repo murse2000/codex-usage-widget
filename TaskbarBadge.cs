@@ -7,11 +7,20 @@ namespace CodexUsageWidget;
 
 internal sealed class TaskbarBadge : IDisposable
 {
+    /// <summary>작업표시줄 표의 한 칸. Label은 구간 이름, Remaining은 남은 비율, Reset은 초기화까지 남은 시간이다.</summary>
+    internal sealed record Cell(string Label, int Remaining, string Reset);
+
+    /// <summary>서비스 한 줄. Cells는 5시간·주간·월간 순서로 고정해 줄마다 열이 맞도록 한다.</summary>
+    internal sealed record Row(string Service, IReadOnlyList<Cell?> Cells);
+
+    private const float BadgeFontSize = 8.5f;
+    private const int Columns = 3;
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 2000 };
     private readonly Action openWidget;
     private readonly Icon icon;
     private readonly ContextMenuStrip menu;
     private BadgeButton? button;
+    private IReadOnlyList<Row> rows = Array.Empty<Row>();
     private string text = "Codex\n확인 중…";
     private bool refreshing;
     private bool disposed;
@@ -41,11 +50,14 @@ internal sealed class TaskbarBadge : IDisposable
         if (timer.Enabled) _ = RefreshAsync();
     }
 
-    internal void Update(string value)
+    internal void Update(IReadOnlyList<Row> value)
     {
-        text = value;
+        rows = value;
+        text = BuildText(value);
         stale = false;
         ApplyText();
+        // 열 너비와 높이를 즉시 다시 맞춘다.
+        _ = RefreshAsync();
     }
 
     internal void MarkStale()
@@ -54,14 +66,26 @@ internal sealed class TaskbarBadge : IDisposable
         ApplyText();
     }
 
+    private static string BuildText(IReadOnlyList<Row> value) => value.Count == 0
+        ? "Codex\n확인 중…"
+        : string.Join("\n", value.Select(row =>
+        {
+            var cells = string.Join(" · ", row.Cells.Where(cell => cell is not null)
+                .Select(cell => $"{cell!.Label} {cell.Remaining}% {cell.Reset}"));
+            return string.IsNullOrEmpty(row.Service) ? cells : row.Service + " " + cells;
+        }));
+
     private void ApplyText()
     {
-        if (button is { IsDisposed: false })
-        {
-            button.Text = stale ? text.Contains('%') ? text.Replace("%", "% !") : "Codex\n확인 실패" : text;
-            button.AccessibleName = (stale ? "갱신 실패 · 마지막 확인값. " : "") + $"Codex 잔여량 {text}. 클릭하면 위젯을 엽니다.";
-        }
+        if (button is not { IsDisposed: false }) return;
+        button.Text = stale ? Decorate(text) : text;
+        button.Rows = rows;
+        button.Stale = stale;
+        button.AccessibleName = (stale ? "갱신 실패 · 마지막 확인값. " : "") + $"Codex 잔여량 {text}. 클릭하면 위젯을 엽니다.";
+        button.Invalidate();
     }
+
+    private static string Decorate(string value) => value.Contains('%') ? value.Replace("%", "% !") : "사용량\n확인 실패";
 
     private async Task RefreshAsync()
     {
@@ -86,13 +110,26 @@ internal sealed class TaskbarBadge : IDisposable
                 button.Click += (_, _) => openWidget();
                 _ = button.Handle;
             }
+            var margin = layout.Dpi * 4 / 96;
+            var available = Math.Max(layout.Dpi * 18 / 96, layout.Bounds.Height - 2 * margin);
             using var graphics = button.CreateGraphics();
-            var width = Math.Max(TextRenderer.MeasureText(graphics, "5시간 100%\n주간 100%", button.Font).Width,
-                TextRenderer.MeasureText(graphics, stale ? text.Replace("%", "% !") : text, button.Font).Width) + layout.Dpi * 52 / 96;
-            var height = Math.Min(layout.Dpi * 40 / 96, layout.Bounds.Height - 2 * (layout.Dpi * 6 / 96));
-            var location = FindSpace(layout.Bounds, layout.Occupied, new Size(width, height), layout.Dpi * 6 / 96);
+            var left = layout.Dpi * 40 / 96;
+            Size size;
+            if (rows.Count == 0)
+            {
+                var width = Math.Max(TextRenderer.MeasureText(graphics, "5시간 100%\n주간 100%", button.Font).Width,
+                    TextRenderer.MeasureText(graphics, Decorate(text), button.Font).Width) + layout.Dpi * 52 / 96;
+                var height = Math.Min(available, Measure(graphics, text, button.Font).Height + 4);
+                size = new Size(width, height);
+            }
+            else
+            {
+                var table = MeasureTable(graphics, button.Font, rows, stale, left, layout.Dpi);
+                size = new Size(table.Width, Math.Min(available, table.Height));
+            }
+            var location = FindSpace(layout.Bounds, layout.Occupied, size, margin);
             if (location is null) { button.Visible = false; return; }
-            button.SetBounds(location.Value.X - layout.Bounds.X, location.Value.Y - layout.Bounds.Y, width, height);
+            button.SetBounds(location.Value.X - layout.Bounds.X, location.Value.Y - layout.Bounds.Y, size.Width, size.Height);
             using var outline = GlassForm.RoundedRectangle(button.ClientRectangle, layout.Dpi * 8f / 96);
             var previous = button.Region;
             button.Region = new Region(outline);
@@ -101,6 +138,8 @@ internal sealed class TaskbarBadge : IDisposable
             var light = key?.GetValue("SystemUsesLightTheme") is int value && value == 1;
             button.BackColor = light ? Color.FromArgb(236, 242, 250) : Color.FromArgb(39, 43, 51);
             button.ForeColor = light ? Color.FromArgb(38, 60, 90) : Color.FromArgb(234, 241, 250);
+            button.WarningColor = light ? Color.FromArgb(173, 109, 20) : Color.FromArgb(230, 169, 74);
+            button.DangerColor = light ? Color.FromArgb(199, 58, 69) : Color.FromArgb(240, 120, 130);
             button.FlatAppearance.MouseOverBackColor = light ? Color.FromArgb(213, 227, 248) : Color.FromArgb(62, 74, 91);
             ApplyText();
             button.Visible = true;
@@ -115,6 +154,58 @@ internal sealed class TaskbarBadge : IDisposable
     }
 
     internal sealed record Layout(IntPtr Taskbar, Rectangle Bounds, int Dpi, Rectangle[] Occupied);
+
+    private sealed record TableLayout(int Width, int Height, int LineHeight, int ServiceWidth, int Gap, int HalfGap,
+        int[] LabelWidths, int[] ValueWidths, int[] TimeWidths, int[] BlockWidths);
+
+    /// <summary>
+    /// 서비스 이름, 구간 이름, 남은 비율, 초기화까지 남은 시간을 열로 맞춰 그리기 위한 크기를 계산한다.
+    /// 열마다 가장 넓은 칸을 기준으로 하므로 줄이 달라도 같은 열 위치를 쓰고, 구간별로 남는 여백은 생기지 않는다.
+    /// </summary>
+    private static TableLayout MeasureTable(Graphics graphics, Font font, IReadOnlyList<Row> rows, bool stale, int left, int dpi)
+    {
+        var scale = dpi / 96f;
+        var gap = Math.Max(4, (int)Math.Round(10 * scale));
+        var halfGap = Math.Max(3, (int)Math.Round(5 * scale));
+        var serviceWidth = 0;
+        var columns = 0;
+        foreach (var row in rows)
+        {
+            serviceWidth = Math.Max(serviceWidth, Measure(graphics, row.Service, font).Width);
+            for (var index = 0; index < row.Cells.Count && index < Columns; index++)
+                if (row.Cells[index] is not null) columns = Math.Max(columns, index + 1);
+        }
+        var labelWidths = new int[columns];
+        var valueWidths = new int[columns];
+        var timeWidths = new int[columns];
+        var blockWidths = new int[columns];
+        foreach (var row in rows)
+        {
+            for (var index = 0; index < row.Cells.Count && index < columns; index++)
+            {
+                var cell = row.Cells[index];
+                if (cell is null) continue;
+                labelWidths[index] = Math.Max(labelWidths[index], Measure(graphics, cell.Label, font).Width);
+                valueWidths[index] = Math.Max(valueWidths[index], Measure(graphics, ValueText(cell.Remaining, stale), font).Width);
+                timeWidths[index] = Math.Max(timeWidths[index], Measure(graphics, cell.Reset, font).Width);
+            }
+        }
+        var blocks = 0;
+        for (var index = 0; index < columns; index++)
+        {
+            blockWidths[index] = labelWidths[index] + halfGap + valueWidths[index] + halfGap + timeWidths[index];
+            blocks += blockWidths[index] + (index > 0 ? gap : 0);
+        }
+        var width = left + serviceWidth + gap + blocks + (int)Math.Round(8 * scale);
+        var lineHeight = Math.Max(1, Measure(graphics, "Ag", font).Height);
+        var height = rows.Count * lineHeight + (int)Math.Round(4 * scale);
+        return new(width, height, lineHeight, serviceWidth, gap, halfGap, labelWidths, valueWidths, timeWidths, blockWidths);
+    }
+
+    private static Size Measure(Graphics graphics, string value, Font font)
+        => TextRenderer.MeasureText(graphics, value, font, new Size(10000, 10000), TextFormatFlags.NoPadding);
+
+    private static string ValueText(int remaining, bool stale) => $"{remaining}%{(stale ? " !" : "")}";
 
     internal static Layout? ReadLayout(string? monitor)
     {
@@ -176,13 +267,18 @@ internal sealed class TaskbarBadge : IDisposable
     {
         internal IntPtr Taskbar { get; }
         internal int Dpi { get; }
-        private readonly Font textFont = new("Segoe UI", 8.5f);
+        internal IReadOnlyList<Row> Rows { get; set; } = Array.Empty<Row>();
+        internal bool Stale { get; set; }
+        internal Color WarningColor { get; set; } = Color.FromArgb(173, 109, 20);
+        internal Color DangerColor { get; set; } = Color.FromArgb(199, 58, 69);
+        private readonly Font textFont;
         private readonly Bitmap iconImage;
 
         internal BadgeButton(IntPtr taskbar, int dpi, Icon icon)
         {
             Taskbar = taskbar;
             Dpi = dpi;
+            textFont = new Font("Segoe UI", BadgeFontSize);
             Font = textFont;
             FlatStyle = FlatStyle.Flat;
             FlatAppearance.BorderSize = 0;
@@ -217,9 +313,41 @@ internal sealed class TaskbarBadge : IDisposable
             e.Graphics.Clear(ClientRectangle.Contains(PointToClient(MousePosition)) ? FlatAppearance.MouseOverBackColor : BackColor);
             e.Graphics.DrawImage(iconImage, Dpi * 8 / 96, (Height - iconImage.Height) / 2);
             var left = Dpi * 40 / 96;
-            TextRenderer.DrawText(e.Graphics, Text, Font, new Rectangle(left, 0, Width - left - Dpi * 8 / 96, Height),
-                ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+            if (Rows.Count == 0)
+            {
+                TextRenderer.DrawText(e.Graphics, Text, Font, new Rectangle(left, 0, Width - left - Dpi * 8 / 96, Height),
+                    ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+                return;
+            }
+
+            var table = MeasureTable(e.Graphics, Font, Rows, Stale, left, Dpi);
+            var top = Math.Max(0, (Height - Rows.Count * table.LineHeight) / 2);
+            var leftFlags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
+            var rightFlags = TextFormatFlags.Right | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
+            for (var index = 0; index < Rows.Count; index++)
+            {
+                var row = Rows[index];
+                var y = top + index * table.LineHeight;
+                TextRenderer.DrawText(e.Graphics, row.Service, Font, new Rectangle(left, y, table.ServiceWidth, table.LineHeight), ForeColor, leftFlags);
+                var x = left + table.ServiceWidth + table.Gap;
+                for (var block = 0; block < row.Cells.Count && block < table.BlockWidths.Length; block++)
+                {
+                    var cell = row.Cells[block];
+                    if (cell is not null)
+                    {
+                        var valueX = x + table.LabelWidths[block] + table.HalfGap;
+                        TextRenderer.DrawText(e.Graphics, cell.Label, Font, new Rectangle(x, y, table.LabelWidths[block], table.LineHeight), ForeColor, leftFlags);
+                        TextRenderer.DrawText(e.Graphics, ValueText(cell.Remaining, Stale), Font,
+                            new Rectangle(valueX, y, table.ValueWidths[block], table.LineHeight), ValueColor(cell.Remaining), rightFlags);
+                        TextRenderer.DrawText(e.Graphics, cell.Reset, Font,
+                            new Rectangle(valueX + table.ValueWidths[block] + table.HalfGap, y, table.TimeWidths[block], table.LineHeight), ForeColor, leftFlags);
+                    }
+                    x += table.BlockWidths[block] + table.Gap;
+                }
+            }
         }
+
+        private Color ValueColor(int remaining) => remaining < 10 ? DangerColor : remaining < 30 ? WarningColor : ForeColor;
 
         protected override void WndProc(ref Message m)
         {
