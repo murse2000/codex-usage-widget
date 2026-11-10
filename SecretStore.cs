@@ -79,10 +79,10 @@ internal static class SecretStore
 
     private static class Native
     {
-        [DllImport("crypt32.dll", SetLastError = true)]
+        [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         internal static extern bool CryptProtectData(ref DataBlob input, string? description, IntPtr entropy, IntPtr reserved,
             IntPtr prompt, int flags, out DataBlob output);
-        [DllImport("crypt32.dll", SetLastError = true)]
+        [DllImport("crypt32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
         internal static extern bool CryptUnprotectData(ref DataBlob input, out IntPtr description, IntPtr entropy, IntPtr reserved,
             IntPtr prompt, int flags, out DataBlob output);
         [DllImport("kernel32.dll")]

@@ -200,10 +200,11 @@ internal static class Program
 
     private static void CheckShowMessage(Form form)
     {
+        var message = (int)App.GetType("CodexUsageWidget.Program")!.GetField("ShowWindowMessage", Private)!.GetValue(null)!;
         form.Hide();
         Application.DoEvents();
         Check(!form.Visible, "메시지 전 테스트 창 숨김");
-        Native.SendMessage(form.Handle, 0x8001, IntPtr.Zero, IntPtr.Zero);
+        Native.SendMessage(form.Handle, message, IntPtr.Zero, IntPtr.Zero);
         var deadline = DateTime.UtcNow.AddSeconds(5);
         while (!form.Visible && DateTime.UtcNow < deadline) { Application.DoEvents(); Thread.Sleep(20); }
         Check(form.Visible, "중복 실행 메시지로 기존 창 표시");

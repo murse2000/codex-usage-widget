@@ -26,6 +26,7 @@ internal sealed class TaskbarBadge : IDisposable
     private IReadOnlyList<Row> rows = Array.Empty<Row>();
     private string text = "Codex\n확인 중…";
     private BadgeMode mode = BadgeMode.Full;
+    private bool empty;
     private bool refreshing;
     private bool disposed;
     private bool stale;
@@ -57,9 +58,11 @@ internal sealed class TaskbarBadge : IDisposable
     internal void Update(IReadOnlyList<Row> value)
     {
         rows = value;
+        empty = value.Count == 0;
         text = BuildText(value);
         stale = false;
-        ApplyText();
+        if (empty) button?.Hide();
+        else ApplyText();
         // 열 너비와 높이를 즉시 다시 맞춘다.
         _ = RefreshAsync();
     }
@@ -102,6 +105,11 @@ internal sealed class TaskbarBadge : IDisposable
             var layout = await Task.Run(() => ReadLayout(target));
             if (disposed) return;
             if (target != monitor) return;
+            if (empty)
+            {
+                if (button is not null) button.Visible = false;
+                return;
+            }
             if (layout is null)
             {
                 if (button is not null) button.Visible = false;
@@ -133,9 +141,12 @@ internal sealed class TaskbarBadge : IDisposable
             else
             {
                 // 창이 많아 빈 공간이 좁으면 초기화 시간 → 구간 이름 → 서비스 이름 순으로 덜어낸다.
+                // 한 서비스가 두 줄로 나뉜 경우에는 값만 남기면 열 의미가 사라지므로 Values 단계를 건너뛴다.
+                var split = rows.Any(row => string.IsNullOrEmpty(row.Service));
                 TableLayout? chosen = null;
                 foreach (var candidate in new[] { BadgeMode.Full, BadgeMode.Compact, BadgeMode.Values })
                 {
+                    if (candidate == BadgeMode.Values && split) continue;
                     var measured = MeasureTable(graphics, button.Font, rows, stale, left, layout.Dpi, candidate);
                     if (measured.Width + margin > free) continue;
                     mode = candidate;
@@ -221,11 +232,14 @@ internal sealed class TaskbarBadge : IDisposable
             }
         }
         var blocks = 0;
+        var hasBlock = false;
         for (var index = 0; index < columns; index++)
         {
             blockWidths[index] = (showLabels ? labelWidths[index] + halfGap : 0) + valueWidths[index]
                 + (showTimes ? halfGap + timeWidths[index] : 0);
-            blocks += blockWidths[index] + (index > 0 ? gap : 0);
+            if (blockWidths[index] == 0) continue;
+            blocks += (hasBlock ? gap : 0) + blockWidths[index];
+            hasBlock = true;
         }
         var width = left + serviceWidth + gap + blocks + (int)Math.Round(8 * scale);
         var lineHeight = Math.Max(1, Measure(graphics, "Ag", font).Height);
@@ -306,10 +320,17 @@ internal sealed class TaskbarBadge : IDisposable
         using var context = new DpiContext(taskbar);
         if (!Native.GetWindowRect(taskbar, out var bounds) || bounds.Width <= bounds.Height || bounds.Height < 20) return null;
         var root = AutomationElement.FromHandle(taskbar);
+        // 버튼·탭 항목뿐 아니라 검색 상자처럼 편집·그룹·이미지로 노출되는 요소도 자리를 차지한 것으로 본다.
         var elements = root.FindAll(TreeScope.Descendants, new AndCondition(
             new PropertyCondition(AutomationElement.IsOffscreenProperty, false),
-            new OrCondition(new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem))));
+            new OrCondition(
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem),
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Hyperlink),
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem),
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Group),
+                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image))));
         var occupied = new List<Rectangle>();
         foreach (AutomationElement element in elements)
         {
@@ -317,6 +338,8 @@ internal sealed class TaskbarBadge : IDisposable
             var rect = element.Current.BoundingRectangle;
             if (rect.IsEmpty) continue;
             var item = Rectangle.FromLTRB((int)Math.Floor(rect.Left), (int)Math.Floor(rect.Top), (int)Math.Ceiling(rect.Right), (int)Math.Ceiling(rect.Bottom));
+            // 작업표시줄 전체를 감싸는 컨테이너는 빈 공간을 모두 덮으므로 제외한다.
+            if (item.Width > bounds.Width * 3 / 4) continue;
             if (item.IntersectsWith(bounds.Rectangle)) occupied.Add(item);
         }
         // 작업표시줄 구조를 확인할 수 없으면 다른 아이콘 위에 강제로 표시하지 않는다.
@@ -430,6 +453,7 @@ internal sealed class TaskbarBadge : IDisposable
                 var x = left + table.ServiceWidth + table.Gap;
                 for (var block = 0; block < row.Cells.Count && block < table.BlockWidths.Length; block++)
                 {
+                    if (table.BlockWidths[block] == 0) continue;
                     var cell = row.Cells[block];
                     if (cell is not null)
                     {

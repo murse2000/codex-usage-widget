@@ -178,6 +178,9 @@ internal static class TaskbarVerification
         Wait(() => Button(badge) is { IsDisposed: false, Visible: true } replacement && !ReferenceEquals(replacement, button));
         Check(Button(badge)!.Text == "Codex 5시간 73% (245분) · 주간 54% (59시간)", "표시 창 재생성 시 잔여량 유지");
         Check(ReferenceEquals(Button(badge)!.ContextMenuStrip, menu), "표시 창 재생성 시 공유 메뉴 유지");
+        Invoke(badge, "Update", Rows());
+        Wait(() => Button(badge) is { IsDisposed: false, Visible: false });
+        Check(Button(badge) is { Visible: false }, "표시할 서비스가 없으면 배지 숨김");
         var handle = Button(badge)!.Handle;
         badge.Dispose();
         Check(!IsWindow(handle), "종료 시 작업표시줄 표시 제거");

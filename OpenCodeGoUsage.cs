@@ -16,6 +16,11 @@ internal sealed class OpenCodeGoNotConfiguredException : Exception
     internal OpenCodeGoNotConfiguredException() : base("OpenCode Go API 키가 설정되지 않았습니다.") { }
 }
 
+internal sealed class OpenCodeGoRateLimitException : Exception
+{
+    internal OpenCodeGoRateLimitException() : base("OpenCode Go 요청 제한 · 잠시 후 재확인") { }
+}
+
 /// <summary>
 /// OpenCode Go 구독의 5시간(rolling)·주간·월간 사용률을 조회한다.
 /// 응답의 percent는 사용률이므로 화면에는 100 - percent를 잔여량으로 표시한다.
@@ -43,7 +48,7 @@ internal static class OpenCodeGoUsage
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) throw new OpenCodeGoAuthException();
         if (response.StatusCode == HttpStatusCode.TooManyRequests)
-            throw new InvalidOperationException("OpenCode Go 요청 제한 · 잠시 후 재확인");
+            throw new OpenCodeGoRateLimitException();
         response.EnsureSuccessStatusCode();
         if (response.Content.Headers.ContentLength > MaximumResponseSize)
             throw new InvalidDataException("OpenCode Go 응답이 허용 크기를 초과했습니다.");

@@ -7,36 +7,64 @@ namespace CodexUsageWidget;
 
 internal static class Program
 {
-    /// <summary>이미 실행 중인 위젯에 창 표시를 요청하는 메시지.</summary>
-    internal const int ShowWindowMessage = 0x8001;
+    /// <summary>이미 실행 중인 위젯에 창 표시를 요청하는 메시지. 창 제목에 의존하지 않도록 등록 메시지를 쓴다.</summary>
+    internal static readonly int ShowWindowMessage = RegisterShowWindowMessage();
 
     [STAThread]
     private static void Main()
     {
         // 같은 사용자 세션에서 위젯은 하나만 실행한다. 두 번째 실행은 기존 창을 띄우고 끝난다.
-        using var mutex = new Mutex(false, @"Local\CodexUsageWidget");
-        bool owned;
-        try { owned = mutex.WaitOne(0); }
-        catch (AbandonedMutexException) { owned = true; }
+        Mutex? mutex = null;
+        var owned = true;
+        try
+        {
+            mutex = new Mutex(false, @"Local\CodexUsageWidget");
+            owned = mutex.WaitOne(0);
+        }
+        catch (AbandonedMutexException)
+        {
+            owned = true;
+        }
+        catch (Exception error) when (error is UnauthorizedAccessException or IOException)
+        {
+            // 잠금을 만들 수 없으면 중복 실행 차단만 포기하고 정상 실행한다.
+            owned = true;
+        }
         if (!owned)
         {
             ActivateExisting();
+            mutex?.Dispose();
             return;
         }
-        ApplicationConfiguration.Initialize();
-        Application.Run(new UsageForm());
+        try
+        {
+            ApplicationConfiguration.Initialize();
+            Application.Run(new UsageForm());
+        }
+        finally
+        {
+            try { mutex?.ReleaseMutex(); }
+            catch (ApplicationException) { }
+            mutex?.Dispose();
+        }
+    }
+
+    private static int RegisterShowWindowMessage()
+    {
+        var message = Native.RegisterWindowMessage("CodexUsageWidget.ShowWindow");
+        return message != 0 ? (int)message : 0x8001;
     }
 
     private static void ActivateExisting()
     {
-        var window = Native.FindWindow(null, "Codex Usage");
-        if (window != IntPtr.Zero) Native.PostMessage(window, ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
+        // 등록 메시지를 최상위 창에 알린다. 우리 위젯만 처리하므로 제목이 바뀌어도 동작한다.
+        Native.SendNotifyMessage(new IntPtr(0xFFFF), ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
     }
 
     private static class Native
     {
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern IntPtr FindWindow(string? className, string? windowName);
-        [DllImport("user32.dll")] internal static extern bool PostMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern uint RegisterWindowMessage(string message);
+        [DllImport("user32.dll")] internal static extern bool SendNotifyMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
     }
 }
 
@@ -81,6 +109,7 @@ internal sealed class UsageForm : GlassForm
     private bool codexStale;
     private bool goStale;
     private bool goAuthFailed;
+    private bool goRateLimited;
     private bool refreshing;
     private bool checkingTibo;
     private DateTimeOffset nextTiboCheck;
@@ -313,13 +342,8 @@ internal sealed class UsageForm : GlassForm
         {
             if (!IsDisposed)
             {
-                codexStale = goStale = true;
-                RenderCodex();
-                RenderGo();
                 status.Text = "갱신 실패 · " + DateTime.Now.ToString("HH:mm");
                 FitUsageLayout();
-                UpdateTrayText();
-                taskbarBadge.MarkStale();
             }
         }
         finally
@@ -376,6 +400,7 @@ internal sealed class UsageForm : GlassForm
             goWindows = windows;
             goStale = false;
             goAuthFailed = false;
+            goRateLimited = false;
             foreach (var window in windows)
             {
                 var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
@@ -389,10 +414,17 @@ internal sealed class UsageForm : GlassForm
             goWindows = null;
             goAuthFailed = true;
             goStale = false;
+            goRateLimited = false;
+        }
+        else if (result.Error is OpenCodeGoRateLimitException)
+        {
+            goStale = true;
+            goRateLimited = true;
         }
         else if (result.Error is not null)
         {
             goStale = true;
+            goRateLimited = false;
         }
         RenderGo();
     }
@@ -441,7 +473,7 @@ internal sealed class UsageForm : GlassForm
 
     private static string RemainingText(int windowMinutes, TimeSpan timeLeft) => windowMinutes == 300
         ? $"{(int)Math.Ceiling(timeLeft.TotalMinutes)}분 남음"
-        : $"{(int)timeLeft.TotalDays}일 {timeLeft.Hours:00}시간 남음";
+        : $"{(int)timeLeft.TotalDays}일 {timeLeft.Hours}시간 남음";
 
     private string StatusText()
     {
@@ -449,6 +481,7 @@ internal sealed class UsageForm : GlassForm
         var text = "3분마다 갱신 · " + DateTime.Now.ToString("HH:mm");
         if (settings.ShowCodex && codexStale) text += " · Codex 실패";
         if (settings.ShowOpenCodeGo && goAuthFailed) text += " · Go 키 인증 실패";
+        else if (settings.ShowOpenCodeGo && goRateLimited) text += " · Go 요청 제한";
         else if (settings.ShowOpenCodeGo && goStale) text += " · Go 조회 실패";
         return text;
     }
@@ -457,7 +490,7 @@ internal sealed class UsageForm : GlassForm
     {
         var parts = new List<string>();
         if (settings.ShowCodex && codexUsage is { } usage)
-            parts.Add($"{100 - Math.Clamp(usage.Primary.UsedPercent, 0, 100)}%");
+            parts.Add($"Codex {100 - Math.Clamp(usage.Primary.UsedPercent, 0, 100)}%");
         if (settings.ShowOpenCodeGo && goWindows is { Count: > 0 } windows)
         {
             var lowest = windows.OrderBy(window => 100 - Math.Clamp(window.UsedPercent, 0, 100)).First();
@@ -673,6 +706,7 @@ internal sealed class UsageForm : GlassForm
         var bottom = AllRows().Where(row => row.Shown).Select(row => row.Reset.Bottom).DefaultIfEmpty(y).Max();
         status.Location = new Point(LogicalToDeviceUnits(15), Math.Max(Math.Max(y, bottom) + LogicalToDeviceUnits(8), LogicalToDeviceUnits(SectionTop + 6)));
         ClientSize = new Size(Math.Max(width, status.Right + LogicalToDeviceUnits(15)), status.Bottom + LogicalToDeviceUnits(9));
+        KeepOnScreen(Screen.FromControl(this));
     }
 
     private int RowStep(UsageRow row, int top)
@@ -808,6 +842,7 @@ internal sealed class UsageForm : GlassForm
     {
         foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator))
         {
+            if (string.IsNullOrWhiteSpace(directory)) continue;
             var candidate = Path.Combine(directory.Trim('"'), "codex.exe");
             if (File.Exists(candidate)) return candidate;
         }
@@ -1044,12 +1079,30 @@ internal sealed class UsageForm : GlassForm
 
         var protectedKey = SecretStore.Protect(value);
         if (protectedKey is null) return "키를 안전하게 저장하지 못했습니다.";
+        var previousKey = settings.OpenCodeGoKey;
+        var previousApiKey = goApiKey;
+        var previousWindows = goWindows;
+        var previousAuth = goAuthFailed;
+        var previousStale = goStale;
+        var previousRateLimit = goRateLimited;
         settings.OpenCodeGoKey = protectedKey;
         goApiKey = value;
         goAuthFailed = false;
         goWindows = windows;
         goStale = false;
-        if (!SavePosition()) return "설정 저장 실패";
+        goRateLimited = false;
+        if (!SavePosition())
+        {
+            settings.OpenCodeGoKey = previousKey;
+            goApiKey = previousApiKey;
+            goWindows = previousWindows;
+            goAuthFailed = previousAuth;
+            goStale = previousStale;
+            goRateLimited = previousRateLimit;
+            RenderGo();
+            FitUsageLayout();
+            return "설정 저장 실패";
+        }
         RenderGo();
         status.Text = StatusText();
         FitUsageLayout();
@@ -1065,6 +1118,7 @@ internal sealed class UsageForm : GlassForm
         goWindows = null;
         goAuthFailed = false;
         goStale = false;
+        goRateLimited = false;
         SavePosition();
         status.Text = StatusText();
         FitUsageLayout();
@@ -1342,7 +1396,7 @@ internal sealed class UsageForm : GlassForm
                 try
                 {
                     var error = await onSaveKey(keyBox.Text.Trim());
-                    keyBox.Clear();
+                    if (error is null) keyBox.Clear();
                     keyStatusLabel.Text = error ?? "인증 확인 · 키 저장됨";
                     keyStatusLabel.ForeColor = error is null ? Accent : Color.FromArgb(173, 109, 20);
                 }
