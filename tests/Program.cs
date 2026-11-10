@@ -73,6 +73,7 @@ internal static class Program
             Check(!(bool)FormType.GetField("refreshing", Private)!.GetValue(form)!, "초기 조회 종료");
             CheckAppearance(form, settingsPath);
             CheckBadgeTime();
+            CheckHiddenLayout(form);
             foreach (var screen in Screen.AllScreens)
             {
                 form.Location = new Point(screen.WorkingArea.Left + 30, screen.WorkingArea.Top + 30);
@@ -180,6 +181,20 @@ internal static class Program
         Check((string)method.Invoke(null, new object[] { 10080, TimeSpan.FromHours(59.5) })! == "(59시간)", "주간 초기화는 시간 단위 표시");
         Check((string)method.Invoke(null, new object[] { 300, TimeSpan.FromMinutes(245) })! == "(245분)", "5시간 초기화는 분 단위 표시");
         Check((string)method.Invoke(null, new object[] { 0, TimeSpan.FromHours(10 * 24 + 19) })! == "(10일 19시간)", "월간 초기화는 일·시간 표시");
+    }
+
+    private static void CheckHiddenLayout(Form form)
+    {
+        SetState(form, 2, 3);
+        var visibleHeight = form.ClientSize.Height;
+        form.Hide();
+        Fit(form);
+        var hiddenHeight = form.ClientSize.Height;
+        Check(hiddenHeight >= visibleHeight, "숨긴 상태에서도 다섯 행 높이 유지");
+        Check(form.ClientRectangle.Contains(ResetLabel(form, "goMonthly").Bounds), "숨긴 상태에서 계산한 마지막 행이 창 안에 들어감");
+        form.Show();
+        Fit(form);
+        Check(form.ClientSize.Height == hiddenHeight, "숨김·표시 상태의 레이아웃 높이 동일");
     }
 
     private static void CheckGoHidden(Form form)

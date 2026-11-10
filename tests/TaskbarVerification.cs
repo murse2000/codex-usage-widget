@@ -74,6 +74,26 @@ internal static class TaskbarVerification
         Check(Find(bounds, occupied, new Size(130, 38)) == new Point(-2244, 1306), "음수 좌표에서 날씨 옆 첫 빈 공간 선택");
         Check(Find(bounds, new[] { bounds }, new Size(130, 38)) is null, "공간 부족 시 다른 아이콘과 겹치지 않음");
         Check(Find(bounds, occupied, new Size(130, 50)) is null, "높이 부족 시 표시하지 않음");
+        var gapBounds = new Rectangle(0, 1000, 1000, 48);
+        var gapItems = new[] { new Rectangle(0, 1000, 200, 48), new Rectangle(600, 1000, 400, 48) };
+        Check((int)Badge.GetMethod("LargestGap", Flags)!.Invoke(null, new object[] { gapBounds, gapItems, 4 })! == 396,
+            "아이콘 사이 가장 넓은 빈 공간 계산");
+        using (var measure = Graphics.FromHwnd(IntPtr.Zero))
+        using (var font = new Font("Segoe UI", 8.5f))
+        {
+            var tableRows = Rows(
+                ("Codex", new object?[] { Cell("5시간", 73, "(245분)"), Cell("주간", 54, "(59시간)"), null }),
+                ("Go", new object?[] { Cell("5시간", 98, "(142분)"), Cell("주간", 100, "(155시간)"), Cell("월간", 27, "(10일 19시간)") }));
+            var measureTable = Badge.GetMethod("MeasureTable", Flags)!;
+            var modeType = Badge.GetNestedType("BadgeMode", Flags)!;
+            int Width(string mode)
+            {
+                var layout = measureTable.Invoke(null,
+                    new object[] { measure, font, tableRows, false, 40, 96, Enum.Parse(modeType, mode) })!;
+                return (int)layout.GetType().GetProperty("Width")!.GetValue(layout)!;
+            }
+            Check(Width("Full") > Width("Compact") && Width("Compact") > Width("Values"), "공간이 좁을수록 좁은 표시 단계 선택");
+        }
         using var icon = new Icon("assets/Widget.ico");
         using var menu = new ContextMenuStrip();
         menu.Items.Add("검증 메뉴");

@@ -86,6 +86,7 @@ internal sealed class UsageForm : GlassForm
         RestorePosition();
         ResizeEnd += (_, _) => SavePosition();
         SystemEvents.DisplaySettingsChanged += DisplaySettingsChanged;
+        DpiChanged += (_, _) => { if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)FitUsageLayout); };
         timer.Tick += async (_, _) => await RefreshUsageAsync();
         tiboTimer.Tick += async (_, _) => await RefreshTiboAsync();
         Shown += async (_, _) => await RefreshUsageAsync();
@@ -189,7 +190,7 @@ internal sealed class UsageForm : GlassForm
         Controls.Add(row.Bar);
         Controls.Add(row.ResetCaption);
         Controls.Add(row.Reset);
-        row.Shown = false;
+        row.SetShown(false);
     }
 
     private static Icon LoadIcon()
@@ -661,11 +662,11 @@ internal sealed class UsageForm : GlassForm
         var go = ShowGoSection;
         codexSection.Visible = codexRule.Visible = codex;
         goSection.Visible = goRule.Visible = go;
-        codexPrimary.Shown = codex;
-        codexSecondary.Shown = codex && codexUsage?.Secondary is not null;
-        goRolling.Shown = go && HasGo("rolling");
-        goWeekly.Shown = go && HasGo("weekly");
-        goMonthly.Shown = go && HasGo("monthly");
+        codexPrimary.SetShown(codex);
+        codexSecondary.SetShown(codex && codexUsage?.Secondary is not null);
+        goRolling.SetShown(go && HasGo("rolling"));
+        goWeekly.SetShown(go && HasGo("weekly"));
+        goMonthly.SetShown(go && HasGo("monthly"));
     }
 
     private bool HasGo(string key) => goWindows?.Any(window => window.Key == key) == true;
@@ -915,7 +916,7 @@ internal sealed class UsageForm : GlassForm
 
     private void DisplaySettingsChanged(object? sender, EventArgs e)
     {
-        if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)RestorePosition);
+        if (IsHandleCreated && !IsDisposed) BeginInvoke((Action)(() => { RestorePosition(); FitUsageLayout(); }));
     }
 
     private bool SavePosition()
@@ -1099,17 +1100,24 @@ internal sealed class UsageForm : GlassForm
 
     private sealed class UsageRow
     {
+        private bool shown;
+
         internal Label Name { get; } = new();
         internal Label Percent { get; } = new();
         internal RemainingBar Bar { get; } = new();
         internal Label ResetCaption { get; } = new();
         internal Label Reset { get; } = new();
 
-        /// <summary>목록에 포함되는지 여부. 부모 창이 숨겨져 있어도 레이아웃 계산에 쓰인다.</summary>
-        internal bool Shown
+        /// <summary>
+        /// 목록에 포함되는지 여부. Control.Visible은 부모 창이 숨겨지면 false가 되므로
+        /// 레이아웃 계산에는 이 값을 따로 보관한다.
+        /// </summary>
+        internal bool Shown => shown;
+
+        internal void SetShown(bool value)
         {
-            get => Name.Visible;
-            set => Name.Visible = Percent.Visible = Bar.Visible = ResetCaption.Visible = Reset.Visible = value;
+            shown = value;
+            Name.Visible = Percent.Visible = Bar.Visible = ResetCaption.Visible = Reset.Visible = value;
         }
     }
 
