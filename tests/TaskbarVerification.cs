@@ -93,6 +93,13 @@ internal static class TaskbarVerification
                 return (int)layout.GetType().GetProperty("Width")!.GetValue(layout)!;
             }
             Check(Width("Full") > Width("Compact") && Width("Compact") > Width("Values"), "공간이 좁을수록 좁은 표시 단계 선택");
+            var micro = Badge.GetMethod("MeasureMicro", Flags)!.Invoke(null, new object[] { measure, font, tableRows, 96 })!;
+            var microWidth = (int)micro.GetType().GetProperty("Width", Flags)!.GetValue(micro)!;
+            var microLines = ((System.Collections.IEnumerable)micro.GetType().GetProperty("Lines", Flags)!.GetValue(micro)!)
+                .Cast<object>().Select(line => (string)line.GetType().GetProperty("Text", Flags)!.GetValue(line)!).ToList();
+            Check(microWidth < Width("Values"), "아주 좁은 공간에서는 더 좁은 표시 단계 선택");
+            Check(microLines.Count == 2 && microLines[0] == "C54%" && microLines[1] == "G27%",
+                "좁은 공간에서는 서비스별 최저 잔여량만 표시");
         }
         using var icon = new Icon("assets/Widget.ico");
         using var menu = new ContextMenuStrip();

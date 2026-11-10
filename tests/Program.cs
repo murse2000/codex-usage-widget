@@ -74,6 +74,7 @@ internal static class Program
             CheckAppearance(form, settingsPath);
             CheckBadgeTime();
             CheckHiddenLayout(form);
+            CheckShowMessage(form);
             foreach (var screen in Screen.AllScreens)
             {
                 form.Location = new Point(screen.WorkingArea.Left + 30, screen.WorkingArea.Top + 30);
@@ -195,6 +196,23 @@ internal static class Program
         form.Show();
         Fit(form);
         Check(form.ClientSize.Height == hiddenHeight, "숨김·표시 상태의 레이아웃 높이 동일");
+    }
+
+    private static void CheckShowMessage(Form form)
+    {
+        form.Hide();
+        Application.DoEvents();
+        Check(!form.Visible, "메시지 전 테스트 창 숨김");
+        Native.SendMessage(form.Handle, 0x8001, IntPtr.Zero, IntPtr.Zero);
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (!form.Visible && DateTime.UtcNow < deadline) { Application.DoEvents(); Thread.Sleep(20); }
+        Check(form.Visible, "중복 실행 메시지로 기존 창 표시");
+    }
+
+    private static class Native
+    {
+        [System.Runtime.InteropServices.DllImport("user32.dll")]
+        internal static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
     }
 
     private static void CheckGoHidden(Form form)

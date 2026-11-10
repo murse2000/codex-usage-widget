@@ -7,11 +7,36 @@ namespace CodexUsageWidget;
 
 internal static class Program
 {
+    /// <summary>이미 실행 중인 위젯에 창 표시를 요청하는 메시지.</summary>
+    internal const int ShowWindowMessage = 0x8001;
+
     [STAThread]
     private static void Main()
     {
+        // 같은 사용자 세션에서 위젯은 하나만 실행한다. 두 번째 실행은 기존 창을 띄우고 끝난다.
+        using var mutex = new Mutex(false, @"Local\CodexUsageWidget");
+        bool owned;
+        try { owned = mutex.WaitOne(0); }
+        catch (AbandonedMutexException) { owned = true; }
+        if (!owned)
+        {
+            ActivateExisting();
+            return;
+        }
         ApplicationConfiguration.Initialize();
         Application.Run(new UsageForm());
+    }
+
+    private static void ActivateExisting()
+    {
+        var window = Native.FindWindow(null, "Codex Usage");
+        if (window != IntPtr.Zero) Native.PostMessage(window, ShowWindowMessage, IntPtr.Zero, IntPtr.Zero);
+    }
+
+    private static class Native
+    {
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern IntPtr FindWindow(string? className, string? windowName);
+        [DllImport("user32.dll")] internal static extern bool PostMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);
     }
 }
 
@@ -1345,6 +1370,17 @@ internal sealed class UsageForm : GlassForm
             check.Margin = new Padding(0, 0, 0, 4);
             check.Checked = value;
         }
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        // 두 번째 실행에서 보낸 요청이면 숨겨 둔 위젯을 다시 보여준다.
+        if (m.Msg == Program.ShowWindowMessage)
+        {
+            ShowWidget();
+            return;
+        }
+        base.WndProc(ref m);
     }
 
     private static class Native

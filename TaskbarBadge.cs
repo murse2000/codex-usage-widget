@@ -7,8 +7,8 @@ namespace CodexUsageWidget;
 
 internal sealed class TaskbarBadge : IDisposable
 {
-    /// <summary>공간이 좁을 때 덜어내는 표시 단계. Full → Compact → Values 순서로 좁아진다.</summary>
-    internal enum BadgeMode { Full, Compact, Values }
+    /// <summary>공간이 좁을 때 덜어내는 표시 단계. Full → Compact → Values → Micro 순서로 좁아진다.</summary>
+    internal enum BadgeMode { Full, Compact, Values, Micro }
 
     /// <summary>작업표시줄 표의 한 칸. Label은 구간 이름, Remaining은 남은 비율, Reset은 초기화까지 남은 시간이다.</summary>
     internal sealed record Cell(string Label, int Remaining, string Reset);
@@ -142,8 +142,18 @@ internal sealed class TaskbarBadge : IDisposable
                     chosen = measured;
                     break;
                 }
-                if (chosen is null) { button.Visible = false; return; }
-                size = new Size(chosen.Width, Math.Min(available, chosen.Height));
+                if (chosen is not null)
+                {
+                    size = new Size(chosen.Width, Math.Min(available, chosen.Height));
+                }
+                else
+                {
+                    // 그래도 자리가 없으면 서비스별 최저 잔여량만 남긴다.
+                    var micro = MeasureMicro(graphics, button.Font, rows, layout.Dpi);
+                    if (micro.Lines.Count == 0 || micro.Width + margin > free) { button.Visible = false; return; }
+                    mode = BadgeMode.Micro;
+                    size = new Size(micro.Width, Math.Min(available, micro.Height));
+                }
             }
             var location = FindSpace(layout.Bounds, layout.Occupied, size, margin);
             if (location is null) { button.Visible = false; return; }
@@ -222,6 +232,46 @@ internal sealed class TaskbarBadge : IDisposable
         var height = rows.Count * lineHeight + (int)Math.Round(4 * scale);
         return new(width, height, lineHeight, serviceWidth, gap, halfGap, labelWidths, valueWidths, timeWidths, blockWidths, showLabels, showTimes);
     }
+
+    private sealed record MicroLine(string Tag, int Remaining)
+    {
+        internal string Text => $"{Tag}{Remaining}%";
+    }
+
+    private sealed record MicroLayout(int Width, int Height, int LineHeight, int TextWidth, int LeftPad, List<MicroLine> Lines);
+
+    /// <summary>
+    /// 아주 좁은 빈 공간에서는 서비스별로 가장 적게 남은 구간 하나만 "C 46 / G 27"처럼 표시한다.
+    /// 한 서비스가 두 줄로 나뉜 경우(이름 없는 줄)는 앞 줄에 합쳐 최저값을 쓴다.
+    /// </summary>
+    private static MicroLayout MeasureMicro(Graphics graphics, Font font, IReadOnlyList<Row> rows, int dpi)
+    {
+        var scale = dpi / 96f;
+        var lines = new List<MicroLine>();
+        foreach (var row in rows)
+        {
+            var cell = row.Cells.Where(cell => cell is not null).OrderBy(cell => cell!.Remaining).FirstOrDefault();
+            if (cell is null) continue;
+            if (string.IsNullOrEmpty(row.Service) && lines.Count > 0)
+            {
+                if (cell.Remaining < lines[^1].Remaining) lines[^1] = new MicroLine(lines[^1].Tag, cell.Remaining);
+                continue;
+            }
+            lines.Add(new MicroLine(Tag(row.Service), cell.Remaining));
+        }
+        var textWidth = lines.Count == 0 ? 0 : lines.Max(line => Measure(graphics, line.Text, font).Width);
+        var leftPad = Math.Max(2, (int)Math.Round(4 * scale));
+        var lineHeight = Math.Max(1, Measure(graphics, "Ag", font).Height);
+        var height = lines.Count * lineHeight + (int)Math.Round(4 * scale);
+        return new(textWidth + leftPad * 2, height, lineHeight, textWidth, leftPad, lines);
+    }
+
+    private static string Tag(string service) => service switch
+    {
+        "Codex" => "C",
+        "Go" => "G",
+        _ => service.Length > 0 ? service[..1] : string.Empty
+    };
 
     /// <summary>작업표시줄에서 아이콘 사이로 비어 있는 가장 넓은 폭.</summary>
     private static int LargestGap(Rectangle taskbar, IReadOnlyList<Rectangle> occupied, int margin)
@@ -347,14 +397,26 @@ internal sealed class TaskbarBadge : IDisposable
         protected override void OnPaint(PaintEventArgs e)
         {
             e.Graphics.Clear(ClientRectangle.Contains(PointToClient(MousePosition)) ? FlatAppearance.MouseOverBackColor : BackColor);
-            e.Graphics.DrawImage(iconImage, Dpi * 8 / 96, (Height - iconImage.Height) / 2);
             var left = Dpi * 40 / 96;
             if (Rows.Count == 0)
             {
+                e.Graphics.DrawImage(iconImage, Dpi * 8 / 96, (Height - iconImage.Height) / 2);
                 TextRenderer.DrawText(e.Graphics, Text, Font, new Rectangle(left, 0, Width - left - Dpi * 8 / 96, Height),
                     ForeColor, TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
                 return;
             }
+            if (Mode == BadgeMode.Micro)
+            {
+                var micro = MeasureMicro(e.Graphics, Font, Rows, Dpi);
+                var microTop = Math.Max(0, (Height - micro.Lines.Count * micro.LineHeight) / 2);
+                var microFlags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
+                for (var index = 0; index < micro.Lines.Count; index++)
+                    TextRenderer.DrawText(e.Graphics, micro.Lines[index].Text, Font,
+                        new Rectangle(micro.LeftPad, microTop + index * micro.LineHeight, micro.TextWidth, micro.LineHeight),
+                        ValueColor(micro.Lines[index].Remaining), microFlags);
+                return;
+            }
+            e.Graphics.DrawImage(iconImage, Dpi * 8 / 96, (Height - iconImage.Height) / 2);
 
             var table = MeasureTable(e.Graphics, Font, Rows, Stale, left, Dpi, Mode);
             var top = Math.Max(0, (Height - Rows.Count * table.LineHeight) / 2);
