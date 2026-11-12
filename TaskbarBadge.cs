@@ -101,16 +101,22 @@ internal sealed class TaskbarBadge : IDisposable
         refreshing = true;
         try
         {
-            var target = monitor;
-            var layout = await Task.Run(() => ReadLayout(target));
-            if (disposed) return;
-            if (target != monitor) return;
             if (empty)
             {
                 if (button is not null) button.Visible = false;
                 return;
             }
-            if (layout is null)
+            var target = monitor;
+            var probe = await Task.Run(() => ReadLayout(target));
+            if (disposed) return;
+            if (target != monitor) return;
+            if (probe.Transient)
+            {
+                // 시작 메뉴가 열리면 UIA에서 작업표시줄 구조가 잠시 사라진다.
+                // 이때 배지를 숨기지 않고 마지막 배치를 그대로 둔다.
+                return;
+            }
+            if (probe.Layout is not { } layout)
             {
                 if (button is not null) button.Visible = false;
                 return;
@@ -193,6 +199,12 @@ internal sealed class TaskbarBadge : IDisposable
     }
 
     internal sealed record Layout(IntPtr Taskbar, Rectangle Bounds, int Dpi, Rectangle[] Occupied);
+
+    /// <summary>
+    /// 레이아웃 조회 결과. Transient는 작업표시줄은 정상인데 시작 메뉴 등으로
+    /// UIA 트리가 잠시 비어 있는 경우로, 마지막 배치를 그대로 유지해야 한다.
+    /// </summary>
+    internal sealed record LayoutProbe(Layout? Layout, bool Transient);
 
     private sealed record TableLayout(int Width, int Height, int LineHeight, int ServiceWidth, int Gap, int HalfGap,
         int[] LabelWidths, int[] ValueWidths, int[] TimeWidths, int[] BlockWidths, bool ShowLabels, bool ShowTimes);
@@ -306,7 +318,7 @@ internal sealed class TaskbarBadge : IDisposable
 
     private static string ValueText(int remaining, bool stale) => $"{remaining}%{(stale ? " !" : "")}";
 
-    internal static Layout? ReadLayout(string? monitor)
+    internal static LayoutProbe ReadLayout(string? monitor)
     {
         var screen = Screen.AllScreens.FirstOrDefault(item => item.DeviceName == monitor) ?? Screen.PrimaryScreen!;
         var taskbar = Native.FindWindow("Shell_TrayWnd", null);
@@ -316,37 +328,45 @@ internal sealed class TaskbarBadge : IDisposable
             while ((taskbar = Native.FindWindowEx(IntPtr.Zero, taskbar, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero)
                 if (Screen.FromHandle(taskbar).DeviceName == screen.DeviceName) break;
         }
-        if (taskbar == IntPtr.Zero || !Native.IsWindowVisible(taskbar)) return null;
-        using var context = new DpiContext(taskbar);
-        if (!Native.GetWindowRect(taskbar, out var bounds) || bounds.Width <= bounds.Height || bounds.Height < 20) return null;
-        var root = AutomationElement.FromHandle(taskbar);
-        // 버튼·탭 항목뿐 아니라 검색 상자처럼 편집·그룹·이미지로 노출되는 요소도 자리를 차지한 것으로 본다.
-        var elements = root.FindAll(TreeScope.Descendants, new AndCondition(
-            new PropertyCondition(AutomationElement.IsOffscreenProperty, false),
-            new OrCondition(
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem),
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Hyperlink),
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem),
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Group),
-                new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image))));
-        var occupied = new List<Rectangle>();
-        foreach (AutomationElement element in elements)
+        if (taskbar == IntPtr.Zero || !Native.IsWindowVisible(taskbar)) return new(null, false);
+        try
         {
-            if (element.Current.ProcessId == Environment.ProcessId) continue;
-            var rect = element.Current.BoundingRectangle;
-            if (rect.IsEmpty) continue;
-            var item = Rectangle.FromLTRB((int)Math.Floor(rect.Left), (int)Math.Floor(rect.Top), (int)Math.Ceiling(rect.Right), (int)Math.Ceiling(rect.Bottom));
-            // 작업표시줄 전체를 감싸는 컨테이너는 빈 공간을 모두 덮으므로 제외한다.
-            if (item.Width > bounds.Width * 3 / 4) continue;
-            if (item.IntersectsWith(bounds.Rectangle)) occupied.Add(item);
+            using var context = new DpiContext(taskbar);
+            if (!Native.GetWindowRect(taskbar, out var bounds) || bounds.Width <= bounds.Height || bounds.Height < 20) return new(null, false);
+            var root = AutomationElement.FromHandle(taskbar);
+            // 버튼·탭 항목뿐 아니라 검색 상자처럼 편집·그룹·이미지로 노출되는 요소도 자리를 차지한 것으로 본다.
+            var elements = root.FindAll(TreeScope.Descendants, new AndCondition(
+                new PropertyCondition(AutomationElement.IsOffscreenProperty, false),
+                new OrCondition(
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Edit),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Hyperlink),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Group),
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image))));
+            var occupied = new List<Rectangle>();
+            foreach (AutomationElement element in elements)
+            {
+                if (element.Current.ProcessId == Environment.ProcessId) continue;
+                var rect = element.Current.BoundingRectangle;
+                if (rect.IsEmpty) continue;
+                var item = Rectangle.FromLTRB((int)Math.Floor(rect.Left), (int)Math.Floor(rect.Top), (int)Math.Ceiling(rect.Right), (int)Math.Ceiling(rect.Bottom));
+                // 작업표시줄 전체를 감싸는 컨테이너는 빈 공간을 모두 덮으므로 제외한다.
+                if (item.Width > bounds.Width * 3 / 4) continue;
+                if (item.IntersectsWith(bounds.Rectangle)) occupied.Add(item);
+            }
+            // 시작 메뉴가 열리면 UIA에서 작업표시줄 자식이 잠시 0개로 보인다. 숨기지 말고 마지막 배치를 유지한다.
+            if (occupied.Count == 0) return new(null, true);
+            var tray = Native.FindWindowEx(taskbar, IntPtr.Zero, "TrayNotifyWnd", null);
+            if (tray != IntPtr.Zero && Native.GetWindowRect(tray, out var trayBounds)) occupied.Add(trayBounds.Rectangle);
+            return new(new Layout(taskbar, bounds.Rectangle, (int)Native.GetDpiForWindow(taskbar), occupied.ToArray()), false);
         }
-        // 작업표시줄 구조를 확인할 수 없으면 다른 아이콘 위에 강제로 표시하지 않는다.
-        if (occupied.Count == 0) return null;
-        var tray = Native.FindWindowEx(taskbar, IntPtr.Zero, "TrayNotifyWnd", null);
-        if (tray != IntPtr.Zero && Native.GetWindowRect(tray, out var trayBounds)) occupied.Add(trayBounds.Rectangle);
-        return new(taskbar, bounds.Rectangle, (int)Native.GetDpiForWindow(taskbar), occupied.ToArray());
+        catch (Exception error) when (error is COMException or ElementNotAvailableException or InvalidOperationException or Win32Exception)
+        {
+            // 탐색기 전환 중에는 다음 조회에서 다시 연결한다.
+            return new(null, true);
+        }
     }
 
     internal static Point? FindSpace(Rectangle taskbar, IReadOnlyList<Rectangle> occupied, Size size, int margin)

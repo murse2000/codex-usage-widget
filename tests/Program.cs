@@ -372,6 +372,10 @@ internal static class Program
         using (var restored = (Form)Activator.CreateInstance(FormType, true)!)
             Check(restored.TopMost, "재실행 시 항상 위 선택 복원");
         check.Checked = previous;
+        var owned = form.OwnedForms.Length;
+        FormType.GetMethod("ShowOpacityPicker", Private)!.Invoke(form, null);
+        Check(form.OwnedForms.Length == owned, "설정 창 중복 열기 방지");
+        Check(ReferenceEquals(form.OwnedForms.Single(), picker), "중복 요청 시 기존 설정 창 유지");
         picker.Close();
     }
 

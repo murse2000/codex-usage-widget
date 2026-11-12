@@ -26,6 +26,10 @@ internal static class UpdateVerification
         var hash = Hash(zip);
         var release = Parse(Json(hash), new(1, 0, 0))!;
         Check(release is not null, "새 버전 발견");
+        Check((string)release!.GetType().GetProperty("Name")!.GetValue(release)! == "릴리스 이름", "릴리스 이름 추출");
+        Check((string)release.GetType().GetProperty("Body")!.GetValue(release)! == "변경 내용", "릴리스 변경 내용 추출");
+        var prompt = (string)Invoke("Prompt", release, new Version(1, 0, 0))!;
+        Check(prompt.Contains("릴리스 이름") && prompt.Contains("변경 내용"), "업데이트 안내에 릴리스 이름과 변경 내용 표시");
         Check(Parse(Json(hash), new(1, 1, 0, 0)) is null, "같은 버전 반복 업데이트 방지");
         Check(Parse(Json(hash), new(2, 0, 0)) is null, "이전 버전으로 다운그레이드 방지");
         Check(Parse(Json(hash).Replace("\"draft\":false", "\"draft\":true"), new(1, 0, 0)) is null, "초안 제외");
@@ -189,7 +193,7 @@ internal static class UpdateVerification
     private static object? Parse(string json, Version installed) => Invoke("Parse", json, installed);
     private static object? Invoke(string name, params object[] args) => Updater.GetMethod(name, Flags)!.Invoke(null, args);
     private static string Json(string hash, string tag = "v1.1.0") => JsonSerializer.Serialize(new
-    { tag_name = tag, draft = false, prerelease = false, assets = new[] { new { name = "CodexUsageWidget-win-x64.zip", digest = "sha256:" + hash } } });
+    { tag_name = tag, name = "릴리스 이름", body = "변경 내용", draft = false, prerelease = false, assets = new[] { new { name = "CodexUsageWidget-win-x64.zip", digest = "sha256:" + hash } } });
     private static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
     private static void CreateZip(string path, string source, string entry)
     {

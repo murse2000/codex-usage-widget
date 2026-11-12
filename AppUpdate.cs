@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 
 namespace CodexUsageWidget;
 
-internal sealed record UpdateRelease(string Tag, Version Version, string Digest);
+internal sealed record UpdateRelease(string Tag, Version Version, string Digest, string Name, string Body);
 
 internal static class AppUpdate
 {
@@ -43,7 +43,29 @@ internal static class AppUpdate
             throw new InvalidDataException("업데이트 파일 또는 검증 정보가 없습니다.");
         var hash = digest.GetString() ?? "";
         if (!Regex.IsMatch(hash, "^sha256:[a-fA-F0-9]{64}$")) throw new InvalidDataException("업데이트 검증 정보가 올바르지 않습니다.");
-        return new(tag, version, hash[7..]);
+        var name = root.TryGetProperty("name", out var nameValue) && nameValue.ValueKind == JsonValueKind.String ? nameValue.GetString() ?? "" : "";
+        var body = root.TryGetProperty("body", out var bodyValue) && bodyValue.ValueKind == JsonValueKind.String ? bodyValue.GetString() ?? "" : "";
+        return new(tag, version, hash[7..], name, body);
+    }
+
+    /// <summary>설치 여부를 묻는 창에 보여줄 릴리스 이름과 변경 내용.</summary>
+    internal static string Prompt(UpdateRelease release, Version current)
+    {
+        var title = (release.Name ?? "").Trim();
+        var heading = title.Length > 0 && !title.Contains(release.Tag, StringComparison.OrdinalIgnoreCase) ? title + "\n\n" : "";
+        var notes = Notes(release);
+        var content = notes.Length > 0 ? notes : "변경 내용이 등록되지 않았습니다.";
+        return $"새 버전 {release.Tag}이 있습니다. (현재 v{current.ToString(3)})\n\n{heading}{content}\n\n"
+            + "다운로드하고 설치할까요? 설치할 때 위젯이 종료된 후 다시 실행됩니다.";
+    }
+
+    private static string Notes(UpdateRelease release, int maximum = 900)
+    {
+        var body = (release.Body ?? "").Replace("\r\n", "\n").Replace('\r', '\n').Trim();
+        if (body.Length == 0) return "";
+        body = Regex.Replace(body, @"\n{3,}", "\n\n");
+        if (body.Length > maximum) body = body[..maximum].TrimEnd() + "\n…";
+        return body;
     }
 
     internal static async Task<string> DownloadAsync(UpdateRelease release)

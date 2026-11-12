@@ -635,7 +635,7 @@ internal sealed class UsageForm : GlassForm
             updateStatus.Text = $"새 버전 {release.Tag} 사용 가능";
             if (!manual && settings.DeclinedUpdateVersion == release.Tag) return;
             ShowWidget();
-            if (MessageBox.Show(this, $"새 버전 {release.Tag}이 있습니다. (현재 v{AppUpdate.CurrentVersion.ToString(3)})\n\n다운로드하고 설치할까요? 설치할 때 위젯이 종료된 후 다시 실행됩니다.",
+            if (MessageBox.Show(this, AppUpdate.Prompt(release, AppUpdate.CurrentVersion),
                 "Codex 업데이트", MessageBoxButtons.YesNo, MessageBoxIcon.Question, MessageBoxDefaultButton.Button2) != DialogResult.Yes)
             {
                 settings.DeclinedUpdateVersion = release.Tag;
@@ -1128,6 +1128,13 @@ internal sealed class UsageForm : GlassForm
 
     private void ShowOpacityPicker()
     {
+        if (OwnedForms.OfType<OpacityPicker>().FirstOrDefault(picker => !picker.IsDisposed) is { } existing)
+        {
+            // 이미 설정 창이 열려 있으면 새로 만들지 않고 앞으로 가져온다.
+            existing.BringToFront();
+            existing.Activate();
+            return;
+        }
         var picker = new OpacityPicker(Opacity, value => { Opacity = value; SavePosition(); }, IsStartupEnabled(), SetStartupEnabled,
             TopMost, value => { TopMost = settings.AlwaysOnTop = value; SavePosition(); },
             settings.ShowCodex, value => SetService(codex: value),
@@ -1139,6 +1146,7 @@ internal sealed class UsageForm : GlassForm
         if (y + picker.Height > area.Bottom) y = Top - picker.Height - 6;
         picker.Location = new Point(Math.Max(area.Left + 8, x), Math.Max(area.Top + 8, y));
         picker.Show(this);
+        picker.BringToFront();
     }
 
     private static bool IsStartupEnabled()

@@ -111,7 +111,10 @@ internal static class TaskbarVerification
         Wait(() => Button(badge) is { Visible: true } first && Math.Abs(first.Font.Size - 8.5f) < 0.01f);
         var button = Button(badge)!;
         Check(ReferenceEquals(button.ContextMenuStrip, menu), "작업표시줄 버튼에 공유 메뉴 연결");
-        var layout = Badge.GetMethod("ReadLayout", Flags)!.Invoke(null, new object?[] { null })!;
+        var probe = Badge.GetMethod("ReadLayout", Flags)!.Invoke(null, new object?[] { null })!;
+        Check(!(bool)probe.GetType().GetProperty("Transient")!.GetValue(probe)!, "작업표시줄 레이아웃 조회 가능 상태");
+        var layout = probe.GetType().GetProperty("Layout")!.GetValue(probe)
+            ?? throw new InvalidOperationException("작업표시줄 레이아웃을 조회하지 못했습니다.");
         var taskbar = (IntPtr)layout.GetType().GetProperty("Taskbar")!.GetValue(layout)!;
         var area = (Rectangle)layout.GetType().GetProperty("Bounds")!.GetValue(layout)!;
         var obstacles = (Rectangle[])layout.GetType().GetProperty("Occupied")!.GetValue(layout)!;
