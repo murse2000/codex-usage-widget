@@ -55,6 +55,11 @@ internal static class Program
             GoVerification.Run(args.Contains("--live"));
             return;
         }
+        if (args.Contains("--peak"))
+        {
+            PeakVerification.Run();
+            return;
+        }
         var settingsPath = (string)FormType.GetField("SettingsPath", Private)!.GetValue(null)!;
         var backup = File.Exists(settingsPath) ? File.ReadAllBytes(settingsPath) : null;
         Directory.CreateDirectory("obj/layout-verification");

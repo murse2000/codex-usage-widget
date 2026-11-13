@@ -19,6 +19,7 @@ internal sealed class TaskbarBadge : IDisposable
     private const float BadgeFontSize = 8.5f;
     private const int Columns = 3;
     private readonly System.Windows.Forms.Timer timer = new() { Interval = 2000 };
+    private readonly System.Windows.Forms.Timer rainbowTimer = new() { Interval = 90 };
     private readonly Action openWidget;
     private readonly Icon icon;
     private readonly ContextMenuStrip menu;
@@ -40,6 +41,10 @@ internal sealed class TaskbarBadge : IDisposable
         _ = menu.Handle;
         this.openWidget = openWidget;
         timer.Tick += async (_, _) => await RefreshAsync();
+        rainbowTimer.Tick += (_, _) =>
+        {
+            if (button is { IsDisposed: false, Visible: true }) button.Invalidate();
+        };
     }
 
     internal void Start()
@@ -195,7 +200,22 @@ internal sealed class TaskbarBadge : IDisposable
             // 탐색기 전환 중에는 다음 조회에서 다시 연결한다.
             if (!disposed && button is { IsDisposed: false }) button.Visible = false;
         }
-        finally { refreshing = false; }
+        finally
+        {
+            refreshing = false;
+            if (!disposed) UpdateRainbow();
+        }
+    }
+
+    /// <summary>Go 행이 보이고 딥시크 피크 시간일 때만 무지개 애니메이션을 돌린다.</summary>
+    private void UpdateRainbow()
+    {
+        var active = rows.Any(row => row.Service == "Go") && DeepSeekPeak.IsPeak(DateTimeOffset.Now);
+        if (active == rainbowTimer.Enabled) return;
+        if (active) rainbowTimer.Start();
+        else rainbowTimer.Stop();
+        // 피크가 시작·종료될 때 즉시 다시 그려 마지막 색이 남지 않게 한다.
+        if (button is { IsDisposed: false }) button.Invalidate();
     }
 
     internal sealed record Layout(IntPtr Taskbar, Rectangle Bounds, int Dpi, Rectangle[] Occupied);
@@ -388,6 +408,8 @@ internal sealed class TaskbarBadge : IDisposable
         disposed = true;
         timer.Stop();
         timer.Dispose();
+        rainbowTimer.Stop();
+        rainbowTimer.Dispose();
         button?.Dispose();
     }
 
@@ -454,9 +476,7 @@ internal sealed class TaskbarBadge : IDisposable
                 var microTop = Math.Max(0, (Height - micro.Lines.Count * micro.LineHeight) / 2);
                 var microFlags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
                 for (var index = 0; index < micro.Lines.Count; index++)
-                    TextRenderer.DrawText(e.Graphics, micro.Lines[index].Text, Font,
-                        new Rectangle(micro.LeftPad, microTop + index * micro.LineHeight, micro.TextWidth, micro.LineHeight),
-                        ValueColor(micro.Lines[index].Remaining), microFlags);
+                    DrawMicroLine(e.Graphics, micro.Lines[index], micro.LeftPad, microTop + index * micro.LineHeight, micro.TextWidth, micro.LineHeight, microFlags);
                 return;
             }
             e.Graphics.DrawImage(iconImage, Dpi * 8 / 96, (Height - iconImage.Height) / 2);
@@ -469,7 +489,7 @@ internal sealed class TaskbarBadge : IDisposable
             {
                 var row = Rows[index];
                 var y = top + index * table.LineHeight;
-                TextRenderer.DrawText(e.Graphics, row.Service, Font, new Rectangle(left, y, table.ServiceWidth, table.LineHeight), ForeColor, leftFlags);
+                DrawService(e.Graphics, row.Service, left, y, table.ServiceWidth, table.LineHeight, leftFlags);
                 var x = left + table.ServiceWidth + table.Gap;
                 for (var block = 0; block < row.Cells.Count && block < table.BlockWidths.Length; block++)
                 {
@@ -492,6 +512,45 @@ internal sealed class TaskbarBadge : IDisposable
         }
 
         private Color ValueColor(int remaining) => remaining < 10 ? DangerColor : remaining < 30 ? WarningColor : ForeColor;
+
+        private float RainbowLightness => BackColor.GetBrightness() < 0.5f ? 0.68f : 0.45f;
+
+        /// <summary>딥시크 피크 시간에는 Go 이름을 글자마다 다른 무지개색으로 그린다.</summary>
+        private void DrawService(Graphics graphics, string service, int x, int y, int width, int lineHeight, TextFormatFlags flags)
+        {
+            var now = DateTimeOffset.Now;
+            if (service != "Go" || !DeepSeekPeak.IsPeak(now))
+            {
+                TextRenderer.DrawText(graphics, service, Font, new Rectangle(x, y, width, lineHeight), ForeColor, flags);
+                return;
+            }
+            var cursor = x;
+            for (var index = 0; index < service.Length && cursor < x + width; index++)
+            {
+                var part = service[index].ToString();
+                var size = TextRenderer.MeasureText(graphics, part, Font, new Size(10000, 10000), TextFormatFlags.NoPadding);
+                TextRenderer.DrawText(graphics, part, Font, new Rectangle(cursor, y, size.Width, lineHeight),
+                    DeepSeekPeak.Rainbow(now, index, RainbowLightness), flags);
+                cursor += size.Width;
+            }
+        }
+
+        /// <summary>아주 좁은 표시에서도 Go 태그만 무지개로 구분한다.</summary>
+        private void DrawMicroLine(Graphics graphics, MicroLine line, int x, int y, int width, int lineHeight, TextFormatFlags flags)
+        {
+            var now = DateTimeOffset.Now;
+            var color = ValueColor(line.Remaining);
+            if (line.Tag != "G" || !DeepSeekPeak.IsPeak(now))
+            {
+                TextRenderer.DrawText(graphics, line.Text, Font, new Rectangle(x, y, width, lineHeight), color, flags);
+                return;
+            }
+            var tag = TextRenderer.MeasureText(graphics, line.Tag, Font, new Size(10000, 10000), TextFormatFlags.NoPadding);
+            TextRenderer.DrawText(graphics, line.Tag, Font, new Rectangle(x, y, tag.Width, lineHeight),
+                DeepSeekPeak.Rainbow(now, 0, RainbowLightness), flags);
+            TextRenderer.DrawText(graphics, line.Text[line.Tag.Length..], Font,
+                new Rectangle(x + tag.Width, y, Math.Max(0, width - tag.Width), lineHeight), color, flags);
+        }
 
         protected override void WndProc(ref Message m)
         {
