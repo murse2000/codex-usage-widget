@@ -16,11 +16,18 @@ internal static class DeepSeekPeak
     }
 
     private static bool IsRestDay(DateOnly date)
-        => date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday || ChinaHolidays.Contains(date);
+        => date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday || IsChinaHoliday(date);
+
+    /// <summary>신정·노동절·국경절은 연도와 무관하게 적용하고, 음력·연휴는 연도별 목록을 따른다.</summary>
+    private static bool IsChinaHoliday(DateOnly date)
+        => (date.Month == 1 && date.Day == 1)
+        || (date.Month == 5 && date.Day == 1)
+        || (date.Month == 10 && date.Day <= 7)
+        || ChinaHolidays.Contains(date);
 
     /// <summary>
-    /// 중국 본토 공휴일. 2026년은 국무원 발표 기준, 2027년은 추정치다.
-    /// 이후 연도는 이 표를 갱신해야 한다.
+    /// 중국 본토 공휴일. 2026년은 국무원 발표 기준, 2027–2028년은 추정치다.
+    /// 고정 공휴일은 별도로 처리하므로 이 표에는 음력·연휴만 있어도 된다.
     /// </summary>
     private static readonly HashSet<DateOnly> ChinaHolidays = BuildHolidays();
 
@@ -49,6 +56,11 @@ internal static class DeepSeekPeak
         Add(2027, 6, 7, 3);
         Add(2027, 9, 15, 3);
         Add(2027, 10, 1, 7);
+        // 2028 (추정)
+        Add(2028, 1, 26, 6);   // 춘절
+        Add(2028, 4, 4, 1);    // 청명
+        Add(2028, 5, 28, 1);   // 단오
+        Add(2028, 10, 3, 1);   // 중추
         return holidays;
     }
 
