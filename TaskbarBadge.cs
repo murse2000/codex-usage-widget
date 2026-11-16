@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.ComponentModel;
+using System.Collections.Concurrent;
 using System.Windows.Automation;
 using Microsoft.Win32;
 
@@ -18,8 +19,12 @@ internal sealed class TaskbarBadge : IDisposable
 
     private const float BadgeFontSize = 8.5f;
     private const int Columns = 3;
-    private readonly System.Windows.Forms.Timer timer = new() { Interval = 2000 };
+    private readonly System.Windows.Forms.Timer timer = new() { Interval = 10000 };
     private readonly System.Windows.Forms.Timer rainbowTimer = new() { Interval = 90 };
+    private static readonly BlockingCollection<Action> StaWork = new();
+    private static readonly CacheRequest LayoutCache = CreateLayoutCache();
+    private bool? lightTheme;
+    private DateTimeOffset themeCheckedAt;
     private readonly Action openWidget;
     private readonly Icon icon;
     private readonly ContextMenuStrip menu;
@@ -45,6 +50,50 @@ internal sealed class TaskbarBadge : IDisposable
         {
             if (button is { IsDisposed: false, Visible: true }) button.Invalidate();
         };
+    }
+
+    static TaskbarBadge()
+    {
+        // UIA는 STA에서 호출하고 한 스레드에서 COM 객체를 재사용해야 프록시가 쌓이지 않는다.
+        var thread = new Thread(() =>
+        {
+            foreach (var action in StaWork.GetConsumingEnumerable()) action();
+        })
+        { IsBackground = true, Name = "UIA" };
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+    }
+
+    private static Task<T> OnSta<T>(Func<T> work)
+    {
+        var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        StaWork.Add(() =>
+        {
+            try { completion.SetResult(work()); }
+            catch (Exception error) { completion.SetException(error); }
+        });
+        return completion.Task;
+    }
+
+    private static CacheRequest CreateLayoutCache()
+    {
+        var cache = new CacheRequest
+        {
+            TreeScope = TreeScope.Element,
+            AutomationElementMode = AutomationElementMode.None
+        };
+        cache.Add(AutomationElement.BoundingRectangleProperty);
+        cache.Add(AutomationElement.ProcessIdProperty);
+        return cache;
+    }
+
+    private bool IsLightTheme()
+    {
+        if (lightTheme is { } cached && DateTimeOffset.UtcNow - themeCheckedAt < TimeSpan.FromSeconds(30)) return cached;
+        using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+        lightTheme = key?.GetValue("SystemUsesLightTheme") is int value && value == 1;
+        themeCheckedAt = DateTimeOffset.UtcNow;
+        return lightTheme.Value;
     }
 
     internal void Start()
@@ -112,7 +161,7 @@ internal sealed class TaskbarBadge : IDisposable
                 return;
             }
             var target = monitor;
-            var probe = await Task.Run(() => ReadLayout(target));
+            var probe = await OnSta(() => ReadLayout(target));
             if (disposed) return;
             if (target != monitor) return;
             if (probe.Transient)
@@ -184,8 +233,7 @@ internal sealed class TaskbarBadge : IDisposable
             var previous = button.Region;
             button.Region = new Region(outline);
             previous?.Dispose();
-            using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-            var light = key?.GetValue("SystemUsesLightTheme") is int value && value == 1;
+            var light = IsLightTheme();
             button.BackColor = light ? Color.FromArgb(236, 242, 250) : Color.FromArgb(39, 43, 51);
             button.ForeColor = light ? Color.FromArgb(38, 60, 90) : Color.FromArgb(234, 241, 250);
             button.WarningColor = light ? Color.FromArgb(173, 109, 20) : Color.FromArgb(230, 169, 74);
@@ -355,7 +403,7 @@ internal sealed class TaskbarBadge : IDisposable
             if (!Native.GetWindowRect(taskbar, out var bounds) || bounds.Width <= bounds.Height || bounds.Height < 20) return new(null, false);
             var root = AutomationElement.FromHandle(taskbar);
             // 버튼·탭 항목뿐 아니라 검색 상자처럼 편집·그룹·이미지로 노출되는 요소도 자리를 차지한 것으로 본다.
-            var elements = root.FindAll(TreeScope.Descendants, new AndCondition(
+            var condition = new AndCondition(
                 new PropertyCondition(AutomationElement.IsOffscreenProperty, false),
                 new OrCondition(
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Button),
@@ -364,17 +412,22 @@ internal sealed class TaskbarBadge : IDisposable
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Hyperlink),
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.MenuItem),
                     new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Group),
-                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image))));
+                    new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.Image)));
             var occupied = new List<Rectangle>();
-            foreach (AutomationElement element in elements)
+            // 요소마다 COM 속성을 읽지 않고 필요한 값만 한 번에 캐시한다.
+            using (LayoutCache.Activate())
             {
-                if (element.Current.ProcessId == Environment.ProcessId) continue;
-                var rect = element.Current.BoundingRectangle;
-                if (rect.IsEmpty) continue;
-                var item = Rectangle.FromLTRB((int)Math.Floor(rect.Left), (int)Math.Floor(rect.Top), (int)Math.Ceiling(rect.Right), (int)Math.Ceiling(rect.Bottom));
-                // 작업표시줄 전체를 감싸는 컨테이너는 빈 공간을 모두 덮으므로 제외한다.
-                if (item.Width > bounds.Width * 3 / 4) continue;
-                if (item.IntersectsWith(bounds.Rectangle)) occupied.Add(item);
+                var elements = root.FindAll(TreeScope.Descendants, condition);
+                foreach (AutomationElement element in elements)
+                {
+                    if (element.Cached.ProcessId == Environment.ProcessId) continue;
+                    var rect = element.Cached.BoundingRectangle;
+                    if (rect.IsEmpty) continue;
+                    var item = Rectangle.FromLTRB((int)Math.Floor(rect.Left), (int)Math.Floor(rect.Top), (int)Math.Ceiling(rect.Right), (int)Math.Ceiling(rect.Bottom));
+                    // 작업표시줄 전체를 감싸는 컨테이너는 빈 공간을 모두 덮으므로 제외한다.
+                    if (item.Width > bounds.Width * 3 / 4) continue;
+                    if (item.IntersectsWith(bounds.Rectangle)) occupied.Add(item);
+                }
             }
             // 시작 메뉴가 열리면 UIA에서 작업표시줄 자식이 잠시 0개로 보인다. 숨기지 말고 마지막 배치를 유지한다.
             if (occupied.Count == 0) return new(null, true);

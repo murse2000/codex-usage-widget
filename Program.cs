@@ -104,6 +104,8 @@ internal sealed class UsageForm : GlassForm
     private readonly WidgetSettings settings = LoadSettings();
     private static readonly string SettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageWidget", "settings.json");
     private string? goApiKey;
+    private Process? codexProcess;
+    private int codexRequestId;
     private IReadOnlyList<GoUsageWindow>? goWindows;
     private UsageSnapshot? codexUsage;
     private bool codexStale;
@@ -156,6 +158,7 @@ internal sealed class UsageForm : GlassForm
             tiboTimer.Dispose();
             tiboClient.Dispose();
             goClient.Dispose();
+            StopCodex();
             updateTimer.Stop();
             updateTimer.Dispose();
             SystemEvents.DisplaySettingsChanged -= DisplaySettingsChanged;
@@ -350,7 +353,18 @@ internal sealed class UsageForm : GlassForm
         {
             refreshing = false;
             if (!IsDisposed) refreshButton.Enabled = true;
+            // UIA COM 객체와 임시 할당은 finalizer로만 정리되므로 주기적으로 회수한다.
+            CollectGarbage();
         }
+    }
+
+    private static void CollectGarbage()
+    {
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: false);
+        GC.WaitForPendingFinalizers();
+        GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: false);
+        try { Native.EmptyWorkingSet(Native.GetCurrentProcess()); }
+        catch (Exception) { }
     }
 
     private sealed class FetchResult<T>
@@ -361,10 +375,14 @@ internal sealed class UsageForm : GlassForm
         internal static FetchResult<T> Empty { get; } = new(default, null);
     }
 
-    private static FetchResult<UsageSnapshot> FetchCodex()
+    private FetchResult<UsageSnapshot> FetchCodex()
     {
         try { return new(ReadUsage(), null); }
-        catch (Exception error) { return new(default, error); }
+        catch (Exception error)
+        {
+            StopCodex();
+            return new(default, error);
+        }
     }
 
     private async Task<FetchResult<IReadOnlyList<GoUsageWindow>>> FetchGoAsync(string apiKey)
@@ -767,44 +785,68 @@ internal sealed class UsageForm : GlassForm
         _ => "사용 한도"
     };
 
-    private static UsageSnapshot ReadUsage()
+    private UsageSnapshot ReadUsage()
     {
-        var codex = FindCodexExecutable();
-        using var process = new Process
+        var process = EnsureCodex();
+        var id = ++codexRequestId;
+        Send(process, new { id, method = "account/rateLimits/read", @params = new { excludeResetCreditDetails = true } });
+        using var response = ReadResponse(process, id);
+        var result = response.RootElement.GetProperty("result");
+        var limits = result.GetProperty("rateLimits");
+        if (result.TryGetProperty("rateLimitsByLimitId", out var byId) && byId.ValueKind == JsonValueKind.Object && byId.TryGetProperty("codex", out var codexLimit)) limits = codexLimit;
+        var primary = ReadWindow(limits.GetProperty("primary"));
+        UsageWindow? secondary = limits.TryGetProperty("secondary", out var value) && value.ValueKind == JsonValueKind.Object ? ReadWindow(value) : null;
+        return new UsageSnapshot(primary, secondary);
+    }
+
+    /// <summary>
+    /// codex app-server를 앱 수명 동안 하나만 유지하고 재사용한다.
+    /// 3분마다 프로세스를 새로 띄우면 핸들·메모리가 계속 늘어난다.
+    /// </summary>
+    private Process EnsureCodex()
+    {
+        if (codexProcess is { HasExited: false } running) return running;
+        StopCodex();
+        var process = new Process
         {
             StartInfo = new ProcessStartInfo
             {
-                FileName = codex,
+                FileName = FindCodexExecutable(),
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
+                RedirectStandardOutput = true
             }
         };
         process.StartInfo.ArgumentList.Add("app-server");
         process.StartInfo.ArgumentList.Add("--stdio");
         if (!process.Start()) throw new InvalidOperationException();
+        process.StandardInput.AutoFlush = true;
+        codexProcess = process;
+        codexRequestId = 0;
+        var id = ++codexRequestId;
+        Send(process, new { id, method = "initialize", @params = new { clientInfo = new { name = "codex-usage-widget", title = "Codex Usage Widget", version = "1.0" }, capabilities = new { experimentalApi = false } } });
+        using var initialized = ReadResponse(process, id);
+        Send(process, new { method = "initialized" });
+        return process;
+    }
+
+    private void StopCodex()
+    {
+        var process = Interlocked.Exchange(ref codexProcess, null);
+        if (process is null) return;
         try
         {
-            process.StandardInput.AutoFlush = true;
-            Send(process, new { id = 1, method = "initialize", @params = new { clientInfo = new { name = "codex-usage-widget", title = "Codex Usage Widget", version = "1.0" }, capabilities = new { experimentalApi = false } } });
-            using var initialized = ReadResponse(process, 1);
-            Send(process, new { method = "initialized" });
-            Send(process, new { id = 2, method = "account/rateLimits/read", @params = new { excludeResetCreditDetails = true } });
-            using var response = ReadResponse(process, 2);
-            var result = response.RootElement.GetProperty("result");
-            var limits = result.GetProperty("rateLimits");
-            if (result.TryGetProperty("rateLimitsByLimitId", out var byId) && byId.ValueKind == JsonValueKind.Object && byId.TryGetProperty("codex", out var codexLimit)) limits = codexLimit;
-            var primary = ReadWindow(limits.GetProperty("primary"));
-            UsageWindow? secondary = limits.TryGetProperty("secondary", out var value) && value.ValueKind == JsonValueKind.Object ? ReadWindow(value) : null;
-            process.StandardInput.Close();
-            process.WaitForExit(2000);
-            return new UsageSnapshot(primary, secondary);
+            if (!process.HasExited)
+            {
+                process.Kill(true);
+                process.WaitForExit(5000);
+            }
         }
+        catch (Exception) { }
         finally
         {
-            if (!process.HasExited) process.Kill(true);
+            process.Dispose();
         }
     }
 
@@ -1449,5 +1491,7 @@ internal sealed class UsageForm : GlassForm
     {
         [DllImport("user32.dll")] internal static extern bool ReleaseCapture();
         [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr handle, int message, int wParam, int lParam);
+        [DllImport("kernel32.dll")] internal static extern IntPtr GetCurrentProcess();
+        [DllImport("psapi.dll")] internal static extern bool EmptyWorkingSet(IntPtr process);
     }
 }
