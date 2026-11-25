@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Collections.Concurrent;
 using System.Windows.Automation;
 using Microsoft.Win32;
@@ -34,9 +35,13 @@ internal sealed class TaskbarBadge : IDisposable
     private BadgeMode mode = BadgeMode.Full;
     private bool empty;
     private bool refreshing;
+    private bool pendingRefresh;
     private bool disposed;
     private bool stale;
+    private int stateVersion;
     private string? monitor;
+    internal long? LastQueryMilliseconds { get; private set; }
+    internal DateTimeOffset? LastQueryAt { get; private set; }
 
     internal TaskbarBadge(Icon icon, ContextMenuStrip menu, Action openWidget)
     {
@@ -45,7 +50,7 @@ internal sealed class TaskbarBadge : IDisposable
         // 탐색기와 배율이 달라도 메뉴는 앱의 좌표계에서 생성한다.
         _ = menu.Handle;
         this.openWidget = openWidget;
-        timer.Tick += async (_, _) => await RefreshAsync();
+        timer.Tick += (_, _) => _ = RefreshAsync();
         rainbowTimer.Tick += (_, _) =>
         {
             if (button is { IsDisposed: false, Visible: true }) button.Invalidate();
@@ -105,16 +110,20 @@ internal sealed class TaskbarBadge : IDisposable
     internal void SetMonitor(string value)
     {
         if (monitor == value) return;
+        stateVersion++;
+        if (refreshing) pendingRefresh = true;
         monitor = value;
         if (timer.Enabled) _ = RefreshAsync();
     }
 
-    internal void Update(IReadOnlyList<Row> value)
+    internal void Update(IReadOnlyList<Row> value, bool? stale = null)
     {
+        stateVersion++;
+        if (refreshing) pendingRefresh = true;
         rows = value;
         empty = value.Count == 0;
         text = BuildText(value);
-        stale = false;
+        if (stale is { } isStale) this.stale = isStale;
         if (empty) button?.Hide();
         else ApplyText();
         // 열 너비와 높이를 즉시 다시 맞춘다.
@@ -139,11 +148,14 @@ internal sealed class TaskbarBadge : IDisposable
     private void ApplyText()
     {
         if (button is not { IsDisposed: false }) return;
-        button.Text = stale ? Decorate(text) : text;
+        var displayText = mode == BadgeMode.Micro && rows.Count > 0
+            ? string.Join("\n", MicroLines(rows, stale).Select(line => line.Text))
+            : stale ? Decorate(text) : text;
+        button.Text = displayText;
         button.Rows = rows;
         button.Mode = mode;
         button.Stale = stale;
-        button.AccessibleName = (stale ? "갱신 실패 · 마지막 확인값. " : "") + $"Codex 잔여량 {text}. 클릭하면 위젯을 엽니다.";
+        button.AccessibleName = (stale ? "갱신 실패 · 마지막 확인값. " : "") + $"Codex 잔여량 {displayText}. 클릭하면 위젯을 엽니다.";
         button.Invalidate();
     }
 
@@ -153,6 +165,9 @@ internal sealed class TaskbarBadge : IDisposable
     {
         if (disposed || refreshing) return;
         refreshing = true;
+        pendingRefresh = false;
+        var version = stateVersion;
+        var target = monitor;
         try
         {
             if (empty)
@@ -160,17 +175,25 @@ internal sealed class TaskbarBadge : IDisposable
                 if (button is not null) button.Visible = false;
                 return;
             }
-            var target = monitor;
-            var probe = await OnSta(() => ReadLayout(target));
-            if (disposed) return;
-            if (target != monitor) return;
+            var queryWatch = Stopwatch.StartNew();
+            LayoutProbe probe;
+            try
+            {
+                probe = await OnSta(() => ReadLayout(target));
+            }
+            finally
+            {
+                LastQueryMilliseconds = queryWatch.ElapsedMilliseconds;
+                LastQueryAt = DateTimeOffset.UtcNow;
+            }
+            if (disposed || empty || version != stateVersion || target != monitor) return;
             if (probe.Transient)
             {
                 // 시작 메뉴가 열리면 UIA에서 작업표시줄 구조가 잠시 사라진다.
                 // 이때 배지를 숨기지 않고 마지막 배치를 그대로 둔다.
                 return;
             }
-            if (probe.Layout is not { } layout)
+            if (probe.Layout is not { } layout || !IsUsableLayout(layout))
             {
                 if (button is not null) button.Visible = false;
                 return;
@@ -220,7 +243,7 @@ internal sealed class TaskbarBadge : IDisposable
                 else
                 {
                     // 그래도 자리가 없으면 서비스별 최저 잔여량만 남긴다.
-                    var micro = MeasureMicro(graphics, button.Font, rows, layout.Dpi);
+                    var micro = MeasureMicro(graphics, button.Font, rows, layout.Dpi, stale);
                     if (micro.Lines.Count == 0 || micro.Width + margin > free) { button.Visible = false; return; }
                     mode = BadgeMode.Micro;
                     size = new Size(micro.Width, Math.Min(available, micro.Height));
@@ -243,7 +266,7 @@ internal sealed class TaskbarBadge : IDisposable
             button.Visible = true;
             Native.SetWindowPos(button.Handle, IntPtr.Zero, 0, 0, 0, 0, 0x0013);
         }
-        catch (Exception error) when (error is COMException or ElementNotAvailableException or InvalidOperationException or Win32Exception)
+        catch (Exception error) when (error is COMException or ElementNotAvailableException or InvalidOperationException or Win32Exception or ArgumentException)
         {
             // 탐색기 전환 중에는 다음 조회에서 다시 연결한다.
             if (!disposed && button is { IsDisposed: false }) button.Visible = false;
@@ -251,6 +274,9 @@ internal sealed class TaskbarBadge : IDisposable
         finally
         {
             refreshing = false;
+            var refreshAgain = !disposed && (pendingRefresh || version != stateVersion || target != monitor);
+            pendingRefresh = false;
+            if (refreshAgain) _ = RefreshAsync();
             if (!disposed) UpdateRainbow();
         }
     }
@@ -267,6 +293,9 @@ internal sealed class TaskbarBadge : IDisposable
     }
 
     internal sealed record Layout(IntPtr Taskbar, Rectangle Bounds, int Dpi, Rectangle[] Occupied);
+
+    internal static bool IsUsableLayout(Layout? layout)
+        => layout is { Dpi: > 0 } && layout.Taskbar != IntPtr.Zero && Native.IsWindow(layout.Taskbar);
 
     /// <summary>
     /// 레이아웃 조회 결과. Transient는 작업표시줄은 정상인데 시작 메뉴 등으로
@@ -327,9 +356,9 @@ internal sealed class TaskbarBadge : IDisposable
         return new(width, height, lineHeight, serviceWidth, gap, halfGap, labelWidths, valueWidths, timeWidths, blockWidths, showLabels, showTimes);
     }
 
-    private sealed record MicroLine(string Tag, int Remaining)
+    private sealed record MicroLine(string Tag, int Remaining, bool Stale)
     {
-        internal string Text => $"{Tag}{Remaining}%";
+        internal string Text => $"{Tag}{Remaining}%{(Stale ? " !" : "")}";
     }
 
     private sealed record MicroLayout(int Width, int Height, int LineHeight, int TextWidth, int LeftPad, List<MicroLine> Lines);
@@ -338,9 +367,19 @@ internal sealed class TaskbarBadge : IDisposable
     /// 아주 좁은 빈 공간에서는 서비스별로 가장 적게 남은 구간 하나만 "C 46 / G 27"처럼 표시한다.
     /// 한 서비스가 두 줄로 나뉜 경우(이름 없는 줄)는 앞 줄에 합쳐 최저값을 쓴다.
     /// </summary>
-    private static MicroLayout MeasureMicro(Graphics graphics, Font font, IReadOnlyList<Row> rows, int dpi)
+    private static MicroLayout MeasureMicro(Graphics graphics, Font font, IReadOnlyList<Row> rows, int dpi, bool stale)
     {
         var scale = dpi / 96f;
+        var lines = MicroLines(rows, stale);
+        var textWidth = lines.Count == 0 ? 0 : lines.Max(line => Measure(graphics, line.Text, font).Width);
+        var leftPad = Math.Max(2, (int)Math.Round(4 * scale));
+        var lineHeight = Math.Max(1, Measure(graphics, "Ag", font).Height);
+        var height = lines.Count * lineHeight + (int)Math.Round(4 * scale);
+        return new(textWidth + leftPad * 2, height, lineHeight, textWidth, leftPad, lines);
+    }
+
+    private static List<MicroLine> MicroLines(IReadOnlyList<Row> rows, bool stale)
+    {
         var lines = new List<MicroLine>();
         foreach (var row in rows)
         {
@@ -348,16 +387,12 @@ internal sealed class TaskbarBadge : IDisposable
             if (cell is null) continue;
             if (string.IsNullOrEmpty(row.Service) && lines.Count > 0)
             {
-                if (cell.Remaining < lines[^1].Remaining) lines[^1] = new MicroLine(lines[^1].Tag, cell.Remaining);
+                if (cell.Remaining < lines[^1].Remaining) lines[^1] = new MicroLine(lines[^1].Tag, cell.Remaining, stale);
                 continue;
             }
-            lines.Add(new MicroLine(Tag(row.Service), cell.Remaining));
+            lines.Add(new MicroLine(Tag(row.Service), cell.Remaining, stale));
         }
-        var textWidth = lines.Count == 0 ? 0 : lines.Max(line => Measure(graphics, line.Text, font).Width);
-        var leftPad = Math.Max(2, (int)Math.Round(4 * scale));
-        var lineHeight = Math.Max(1, Measure(graphics, "Ag", font).Height);
-        var height = lines.Count * lineHeight + (int)Math.Round(4 * scale);
-        return new(textWidth + leftPad * 2, height, lineHeight, textWidth, leftPad, lines);
+        return lines;
     }
 
     private static string Tag(string service) => service switch
@@ -396,7 +431,7 @@ internal sealed class TaskbarBadge : IDisposable
             while ((taskbar = Native.FindWindowEx(IntPtr.Zero, taskbar, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero)
                 if (Screen.FromHandle(taskbar).DeviceName == screen.DeviceName) break;
         }
-        if (taskbar == IntPtr.Zero || !Native.IsWindowVisible(taskbar)) return new(null, false);
+        if (taskbar == IntPtr.Zero || !Native.IsWindow(taskbar) || !Native.IsWindowVisible(taskbar)) return new(null, false);
         try
         {
             using var context = new DpiContext(taskbar);
@@ -433,7 +468,8 @@ internal sealed class TaskbarBadge : IDisposable
             if (occupied.Count == 0) return new(null, true);
             var tray = Native.FindWindowEx(taskbar, IntPtr.Zero, "TrayNotifyWnd", null);
             if (tray != IntPtr.Zero && Native.GetWindowRect(tray, out var trayBounds)) occupied.Add(trayBounds.Rectangle);
-            return new(new Layout(taskbar, bounds.Rectangle, (int)Native.GetDpiForWindow(taskbar), occupied.ToArray()), false);
+            var layout = new Layout(taskbar, bounds.Rectangle, (int)Native.GetDpiForWindow(taskbar), occupied.ToArray());
+            return IsUsableLayout(layout) ? new(layout, false) : new(null, false);
         }
         catch (Exception error) when (error is COMException or ElementNotAvailableException or InvalidOperationException or Win32Exception)
         {
@@ -525,7 +561,7 @@ internal sealed class TaskbarBadge : IDisposable
             }
             if (Mode == BadgeMode.Micro)
             {
-                var micro = MeasureMicro(e.Graphics, Font, Rows, Dpi);
+                var micro = MeasureMicro(e.Graphics, Font, Rows, Dpi, Stale);
                 var microTop = Math.Max(0, (Height - micro.Lines.Count * micro.LineHeight) / 2);
                 var microFlags = TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.SingleLine | TextFormatFlags.NoPadding;
                 for (var index = 0; index < micro.Lines.Count; index++)
@@ -652,6 +688,7 @@ internal sealed class TaskbarBadge : IDisposable
         }
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern IntPtr FindWindow(string className, string? title);
         [DllImport("user32.dll", CharSet = CharSet.Unicode)] internal static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string className, string? title);
+        [DllImport("user32.dll")] internal static extern bool IsWindow(IntPtr window);
         [DllImport("user32.dll")] internal static extern bool IsWindowVisible(IntPtr window);
         [DllImport("user32.dll")] internal static extern bool GetWindowRect(IntPtr window, out Rect rectangle);
         [DllImport("user32.dll")] internal static extern uint GetDpiForWindow(IntPtr window);

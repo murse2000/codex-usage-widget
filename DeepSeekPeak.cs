@@ -67,7 +67,8 @@ internal static class DeepSeekPeak
     /// <summary>시간에 따라 회전하는 무지개색. index는 글자 위치로, 글자마다 색을 어긋나게 한다.</summary>
     internal static Color Rainbow(DateTimeOffset now, int index, float lightness)
     {
-        var phase = now.ToUnixTimeMilliseconds() % 3600 / 10.0;
+        // 1시간에 한 바퀴를 돌도록 밀리초를 초 단도로 환산한다.
+        var phase = now.ToUnixTimeMilliseconds() % 3_600_000 / 1_000.0;
         var hue = (phase + index * 120) % 360;
         return FromHsl(hue, 0.9, lightness);
     }

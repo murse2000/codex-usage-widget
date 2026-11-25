@@ -1,4 +1,5 @@
 using System.Collections;
+using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Automation;
@@ -69,6 +70,7 @@ internal static class TaskbarVerification
 
     public static void Run()
     {
+        VerifyLayoutValidation();
         var bounds = new Rectangle(-2400, 1300, 2400, 50);
         var occupied = new[] { new Rectangle(-2400, 1300, 150, 50), new Rectangle(-1200, 1300, 600, 50) };
         Check(Find(bounds, occupied, new Size(130, 38)) == new Point(-2244, 1306), "음수 좌표에서 날씨 옆 첫 빈 공간 선택");
@@ -93,23 +95,36 @@ internal static class TaskbarVerification
                 return (int)layout.GetType().GetProperty("Width")!.GetValue(layout)!;
             }
             Check(Width("Full") > Width("Compact") && Width("Compact") > Width("Values"), "공간이 좁을수록 좁은 표시 단계 선택");
-            var micro = Badge.GetMethod("MeasureMicro", Flags)!.Invoke(null, new object[] { measure, font, tableRows, 96 })!;
+            var measureMicro = Badge.GetMethod("MeasureMicro", Flags)!;
+            object MeasureMicro(bool isStale) => measureMicro.Invoke(null,
+                measureMicro.GetParameters().Length == 4
+                    ? new object[] { measure, font, tableRows, 96 }
+                    : new object[] { measure, font, tableRows, 96, isStale })!;
+            var micro = MeasureMicro(false);
             var microWidth = (int)micro.GetType().GetProperty("Width", Flags)!.GetValue(micro)!;
             var microLines = ((System.Collections.IEnumerable)micro.GetType().GetProperty("Lines", Flags)!.GetValue(micro)!)
                 .Cast<object>().Select(line => (string)line.GetType().GetProperty("Text", Flags)!.GetValue(line)!).ToList();
             Check(microWidth < Width("Values"), "아주 좁은 공간에서는 더 좁은 표시 단계 선택");
             Check(microLines.Count == 2 && microLines[0] == "C54%" && microLines[1] == "G27%",
                 "좁은 공간에서는 서비스별 최저 잔여량만 표시");
+            var staleMicro = MeasureMicro(true);
+            var staleMicroWidth = (int)staleMicro.GetType().GetProperty("Width", Flags)!.GetValue(staleMicro)!;
+            var staleMicroLines = ((System.Collections.IEnumerable)staleMicro.GetType().GetProperty("Lines", Flags)!.GetValue(staleMicro)!)
+                .Cast<object>().Select(line => (string)line.GetType().GetProperty("Text", Flags)!.GetValue(line)!).ToList();
+            Check(staleMicroLines[0] == "C54% !", "Micro 모드 측정 텍스트에 stale 실패 표시 반영");
+            Check(staleMicroWidth > microWidth, "Micro 모드 stale 표시를 포함한 너비 계산");
         }
         using var icon = new Icon("assets/Widget.ico");
         using var menu = new ContextMenuStrip();
         menu.Items.Add("검증 메뉴");
+        VerifyRenderingColumnPositions(icon);
         var clicked = false;
         using var badge = (IDisposable)Activator.CreateInstance(Badge, Flags, null, new object[] { icon, menu, (Action)(() => clicked = true) }, null)!;
         Invoke(badge, "Update", Rows(("Codex", new object?[] { Cell("5시간", 73, "(245분)"), Cell("주간", 54, "(59시간)"), null })));
         Invoke(badge, "Start");
         Wait(() => Button(badge) is { Visible: true } first && Math.Abs(first.Font.Size - 8.5f) < 0.01f);
         var button = Button(badge)!;
+        VerifyQueryDiagnostics(badge);
         Check(ReferenceEquals(button.ContextMenuStrip, menu), "작업표시줄 버튼에 공유 메뉴 연결");
         var probe = Badge.GetMethod("ReadLayout", Flags)!.Invoke(null, new object?[] { null })!;
         Check(!(bool)probe.GetType().GetProperty("Transient")!.GetValue(probe)!, "작업표시줄 레이아웃 조회 가능 상태");
@@ -176,7 +191,25 @@ internal static class TaskbarVerification
             + "Go 5시간 98% ! (142분) · 주간 100% ! (155시간) · 월간 27% ! (10일 19시간)",
             "조회 실패 시 마지막 확인값과 실패 표시 유지");
         Invoke(badge, "Update", Rows(("Codex", new object?[] { Cell("5시간", 73, "(245분)"), Cell("주간", 54, "(59시간)"), null })));
-        Check(!button.Text.Contains('!'), "조회 성공 시 실패 표시 해제");
+        Check(button.Text.Contains('!'), "stale 값을 생략한 Update는 기존 실패 표시 유지");
+        Invoke(badge, "Update", Rows(("Codex", new object?[] { Cell("5시간", 73, "(245분)"), Cell("주간", 54, "(59시간)"), null })), false);
+        Check(!button.Text.Contains('!'), "stale false를 명시한 Update는 실패 표시 해제");
+        Invoke(badge, "MarkStale");
+        var microModeType = Badge.GetNestedType("BadgeMode", Flags)!;
+        Badge.GetField("mode", Flags)!.SetValue(badge, Enum.Parse(microModeType, "Micro"));
+        Invoke(badge, "ApplyText");
+        Check(button.Text == "C54% !", "Micro 모드 버튼 텍스트에 stale 실패 표시 반영");
+        Check(button.AccessibleName?.Contains("Codex 잔여량 C54% !.") == true, "Micro 모드 접근성 텍스트가 표시 텍스트와 일치");
+        using var staleMicroImage = new Bitmap(button.Width, button.Height);
+        button.DrawToBitmap(staleMicroImage, button.ClientRectangle);
+        Badge.GetField("stale", Flags)!.SetValue(badge, false);
+        Invoke(badge, "ApplyText");
+        using var freshMicroImage = new Bitmap(button.Width, button.Height);
+        button.DrawToBitmap(freshMicroImage, button.ClientRectangle);
+        Check(!ImagesMatch(staleMicroImage, freshMicroImage), "Micro 모드 실제 렌더링에 stale 실패 표시 반영");
+        Badge.GetField("mode", Flags)!.SetValue(badge, Enum.Parse(microModeType, "Full"));
+        Badge.GetField("stale", Flags)!.SetValue(badge, false);
+        Invoke(badge, "ApplyText");
         button.Dispose();
         Wait(() => Button(badge) is { IsDisposed: false, Visible: true } replacement && !ReferenceEquals(replacement, button));
         Check(Button(badge)!.Text == "Codex 5시간 73% (245분) · 주간 54% (59시간)", "표시 창 재생성 시 잔여량 유지");
@@ -188,8 +221,194 @@ internal static class TaskbarVerification
         badge.Dispose();
         Check(!IsWindow(handle), "종료 시 작업표시줄 표시 제거");
         VerifyMainForm();
+        VerifyMonitorChangeDuringQueryQueuesLatestRefresh(icon, menu);
+        VerifyGenerationChangeDuringQueryQueuesLatestRefresh(icon, menu);
+        VerifyEmptyUpdateDuringQueryStaysHidden(icon, menu);
+        VerifyTimerExceptionDoesNotEscape();
         Console.WriteLine($"작업표시줄 검증 {checks}개 통과");
     }
+
+    private static void VerifyRenderingColumnPositions(Icon icon)
+    {
+        var taskbar = FindWindow("Shell_TrayWnd", null);
+        var dpi = taskbar == IntPtr.Zero ? 96 : (int)GetDpiForWindow(taskbar);
+        var buttonType = Badge.GetNestedType("BadgeButton", Flags)!;
+        using var measure = Graphics.FromHwnd(IntPtr.Zero);
+        using var font = new Font("Segoe UI", 8.5f);
+        var rows = Rows(
+            ("Codex", new object?[] { Cell("5시간", 5, "(1분)"), null, Cell("월간", 5, "(1일)") }),
+            ("Codex", new object?[] { null, Cell("주간", 54, "(2시간)"), Cell("월간", 5, "(1일)") }));
+        var mode = Enum.Parse(Badge.GetNestedType("BadgeMode", Flags)!, "Full");
+        var table = Badge.GetMethod("MeasureTable", Flags)!.Invoke(null, new object[] { measure, font, rows, false, dpi * 40 / 96, dpi, mode })!;
+        var width = (int)table.GetType().GetProperty("Width", Flags)!.GetValue(table)!;
+        var height = (int)table.GetType().GetProperty("Height", Flags)!.GetValue(table)!;
+        var lineHeight = (int)table.GetType().GetProperty("LineHeight", Flags)!.GetValue(table)!;
+        using var button = (Button)Activator.CreateInstance(buttonType, Flags, null, new object[] { taskbar, dpi, icon }, null)!;
+        button.GetType().GetProperty("Rows", Flags)!.SetValue(button, rows);
+        button.GetType().GetProperty("Mode", Flags)!.SetValue(button, mode);
+        button.GetType().GetProperty("DangerColor", Flags)!.SetValue(button, Color.FromArgb(255, 0, 0));
+        button.BackColor = Color.Black;
+        button.ForeColor = Color.White;
+        button.Size = new Size(width, height);
+        button.Visible = false;
+        using var image = new Bitmap(width, height);
+        button.DrawToBitmap(image, button.ClientRectangle);
+        var top = Math.Max(0, (height - 2 * lineHeight) / 2);
+        var left = dpi * 40 / 96;
+        var firstRow = RedPixels(image, top, top + lineHeight, left);
+        var secondRow = RedPixels(image, top + lineHeight, top + 2 * lineHeight, left);
+        Check(firstRow.Count >= 2 && secondRow.Count > 0, "null 열이 있는 행에서도 값 셀이 실제로 렌더링됨");
+        Check(secondRow.Max() == firstRow.Max(), "둘째 행 null 열을 건너뛰지 않고 같은 세 번째 열 X 좌표에 렌더링");
+        Check(firstRow.Max() > firstRow.Min() + 50, "첫 행의 월간 값이 첫 번째 값과 다른 실제 X 좌표에 렌더링");
+    }
+
+    private static List<int> RedPixels(Bitmap image, int top, int bottom, int left)
+    {
+        var result = new List<int>();
+        for (var y = top; y < bottom; y++)
+            for (var x = left; x < image.Width; x++)
+                if (image.GetPixel(x, y).ToArgb() == Color.Red.ToArgb()) result.Add(x);
+        return result;
+    }
+
+    private static void VerifyLayoutValidation()
+    {
+        var layoutType = Badge.GetNestedType("Layout", Flags)!;
+        var isUsable = Badge.GetMethod("IsUsableLayout", Flags);
+        Check(isUsable is not null, "DPI·HWND 유효성을 검사하는 레이아웃 경계 제공");
+        bool Usable(IntPtr taskbar, int dpi)
+        {
+            var layout = Activator.CreateInstance(layoutType,
+                new object[] { taskbar, new Rectangle(0, 0, 1000, 48), dpi, Array.Empty<Rectangle>() })!;
+            return (bool)isUsable!.Invoke(null, new object?[] { layout })!;
+        }
+        var validWindow = FindWindow("Shell_TrayWnd", null);
+        if (validWindow == IntPtr.Zero)
+        {
+            var secondary = IntPtr.Zero;
+            while ((secondary = FindWindowEx(IntPtr.Zero, secondary, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero)
+            {
+                validWindow = secondary;
+                break;
+            }
+        }
+        Check(validWindow != IntPtr.Zero && Usable(validWindow, 96), "유효한 작업표시줄 HWND·DPI 허용");
+        Check(!Usable(IntPtr.Zero, 96), "유효하지 않은 작업표시줄 HWND는 Unavailable");
+        Check(!Usable(validWindow, 0), "DPI 0은 Unavailable");
+        Check(!Usable(validWindow, -96), "음수 DPI는 Unavailable");
+    }
+
+    private static void VerifyQueryDiagnostics(IDisposable badge)
+    {
+        var milliseconds = Badge.GetProperty("LastQueryMilliseconds", Flags);
+        var queriedAt = Badge.GetProperty("LastQueryAt", Flags);
+        Check(milliseconds is not null && queriedAt is not null, "마지막 UIA 조회 시간·시각을 internal 속성으로 노출");
+        var before = DateTimeOffset.UtcNow;
+        var query = (Task)Badge.GetMethod("RefreshAsync", Flags)!.Invoke(badge, null)!;
+        Wait(() => query.IsCompleted);
+        query.GetAwaiter().GetResult();
+        var elapsed = Convert.ToInt64(milliseconds!.GetValue(badge));
+        var timestamp = (DateTimeOffset?)queriedAt!.GetValue(badge);
+        Check(elapsed >= 0 && timestamp is { } value && value >= before && value <= DateTimeOffset.UtcNow,
+            "UIA 조회 경과 시간과 마지막 조회 시각 기록");
+    }
+
+    private static void VerifyMonitorChangeDuringQueryQueuesLatestRefresh(Icon icon, ContextMenuStrip menu)
+    {
+        var result = ObserveRefreshRace(icon, menu, badge => Invoke(badge, "SetMonitor", @"\\.\DISPLAY__VERIFY_CHANGED__"));
+        Check(result.Queued == 1, "UIA 조회 중 모니터 변경 시 최신 요청을 한 번 더 예약");
+    }
+
+    private static void VerifyGenerationChangeDuringQueryQueuesLatestRefresh(Icon icon, ContextMenuStrip menu)
+    {
+        var result = ObserveRefreshRace(icon, menu, badge => Invoke(badge, "Update",
+            Rows(("Codex", new object?[] { Cell("5시간", 46, "(245분)"), Cell("주간", 54, "(59시간)"), null }))));
+        Check(result.Queued == 1, "UIA 조회 중 데이터 세대 변경 시 최신 요청을 한 번 더 예약");
+    }
+
+    private static void VerifyEmptyUpdateDuringQueryStaysHidden(Icon icon, ContextMenuStrip menu)
+    {
+        var result = ObserveRefreshRace(icon, menu, badge => Invoke(badge, "Update", Rows()));
+        Check(!result.Visible, "UIA 조회 중 빈 목록 수신 후 배지가 다시 표시되지 않음");
+        Check(result.Queued == 0, "빈 목록 후속 갱신에서 불필요한 UIA 재조회 없음");
+    }
+
+    private static (bool Visible, int Queued) ObserveRefreshRace(Icon icon, ContextMenuStrip menu, Action<IDisposable> change)
+    {
+        using var badge = CreateBadge(icon, menu);
+        Invoke(badge, "Update", Rows(("Codex", new object?[] { Cell("5시간", 73, "(245분)"), Cell("주간", 54, "(59시간)"), null })));
+        Wait(() => Button(badge) is { Visible: true } && !Refreshing(badge));
+        var staWork = (BlockingCollection<Action>)Badge.GetField("StaWork", Flags)!.GetValue(null)!;
+        using var firstEntered = new ManualResetEventSlim();
+        using var releaseFirst = new ManualResetEventSlim();
+        using var secondEntered = new ManualResetEventSlim();
+        using var releaseSecond = new ManualResetEventSlim();
+        staWork.Add(() => { firstEntered.Set(); releaseFirst.Wait(); });
+        var query = (Task)Badge.GetMethod("RefreshAsync", Flags)!.Invoke(badge, null)!;
+        try
+        {
+            Wait(() => firstEntered.IsSet);
+            change(badge);
+            staWork.Add(() => { secondEntered.Set(); releaseSecond.Wait(); });
+            releaseFirst.Set();
+            Wait(() => query.IsCompleted);
+            query.GetAwaiter().GetResult();
+            Wait(() => secondEntered.IsSet);
+            return (Button(badge)?.Visible == true, staWork.Count);
+        }
+        finally
+        {
+            releaseFirst.Set();
+            releaseSecond.Set();
+            Wait(() => !Refreshing(badge) && staWork.Count == 0);
+        }
+    }
+
+    private static void VerifyTimerExceptionDoesNotEscape()
+    {
+        Exception? failure = null;
+        var escaped = 0;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                using var icon = new Icon("assets/Widget.ico");
+                using var menu = new ContextMenuStrip();
+                using var badge = CreateBadge(icon, menu);
+                Invoke(badge, "Update", Rows(("Codex", new object?[] { Cell("5시간", 73, "(245분)"), Cell("주간", 54, "(59시간)"), null })));
+                Invoke(badge, "Start");
+                Wait(() => Button(badge) is { Visible: true } && !Refreshing(badge));
+                var timer = (System.Windows.Forms.Timer)Badge.GetField("timer", Flags)!.GetValue(badge)!;
+                ThreadExceptionEventHandler handler = (_, _) => Interlocked.Increment(ref escaped);
+                Application.ThreadException += handler;
+                try
+                {
+                    Button(badge)!.Dispose();
+                    icon.Dispose();
+                    timer.Interval = 1;
+                    var deadline = DateTime.UtcNow.AddSeconds(2);
+                    while (DateTime.UtcNow < deadline) { Application.DoEvents(); Thread.Sleep(20); }
+                }
+                finally
+                {
+                    timer.Stop();
+                    Application.ThreadException -= handler;
+                }
+                if (escaped != 0) failure = new InvalidOperationException("타이머 갱신의 예상 예외가 앱 경계로 새었습니다.");
+            }
+            catch (Exception error) { failure = error; }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (failure is not null) throw failure;
+        Check(true, "타이머 갱신의 예상 예외가 앱 경계로 새지 않음");
+    }
+
+    private static IDisposable CreateBadge(Icon icon, ContextMenuStrip menu)
+        => (IDisposable)Activator.CreateInstance(Badge, Flags, null, new object[] { icon, menu, (Action)(() => { }) }, null)!;
+    private static bool Refreshing(IDisposable badge) => (bool)Badge.GetField("refreshing", Flags)!.GetValue(badge)!;
 
     private static void VerifyMainForm()
     {
@@ -312,7 +531,21 @@ internal static class TaskbarVerification
         return rowList;
     }
     private static Button? Button(IDisposable badge) => (Button?)Badge.GetField("button", Flags)!.GetValue(badge);
-    private static void Invoke(IDisposable badge, string method, params object[] args) => Badge.GetMethod(method, Flags)!.Invoke(badge, args);
+    private static bool ImagesMatch(Bitmap first, Bitmap second)
+    {
+        if (first.Size != second.Size) return false;
+        for (var y = 0; y < first.Height; y++)
+            for (var x = 0; x < first.Width; x++)
+                if (first.GetPixel(x, y).ToArgb() != second.GetPixel(x, y).ToArgb()) return false;
+        return true;
+    }
+    private static void Invoke(IDisposable badge, string method, params object[] args)
+    {
+        var target = Badge.GetMethod(method, Flags)!;
+        var parameters = target.GetParameters();
+        var values = args.Concat(parameters.Skip(args.Length).Select(_ => Type.Missing)).ToArray();
+        target.Invoke(badge, values);
+    }
     private static void Wait(Func<bool> condition)
     {
         var deadline = DateTime.UtcNow.AddSeconds(15);

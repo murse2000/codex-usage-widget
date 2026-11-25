@@ -41,6 +41,14 @@ internal static class PeakVerification
         Check(first.ToArgb() != second.ToArgb(), "시간에 따라 무지개색 변화");
         var next = (Color)rainbow.Invoke(null, new object[] { DateTimeOffset.Parse("2026-11-13T10:00:00+09:00"), 1, 0.45f })!;
         Check(first.ToArgb() != next.ToArgb(), "글자마다 다른 무지개색");
+        Color RainbowAt(string value) => (Color)rainbow.Invoke(null, new object[] { DateTimeOffset.Parse(value), 0, 0.45f })!;
+        Check(RainbowAt("2026-11-13T10:00:03.6+09:00").ToArgb() != first.ToArgb(), "3.6초마다 색상이 반복하지 않고 1시간 주기로 진행");
+        Check(RainbowAt("2026-11-13T11:00:00+09:00").ToArgb() == first.ToArgb(), "무지개색은 1시간 주기로 반복");
+        var beforePeakEnd = RainbowAt("2026-11-13T18:59:59.999+09:00");
+        var afterPeakEnd = RainbowAt("2026-11-13T19:00:00.001+09:00");
+        var channelDelta = new[] { beforePeakEnd.R, beforePeakEnd.G, beforePeakEnd.B }
+            .Zip(new[] { afterPeakEnd.R, afterPeakEnd.G, afterPeakEnd.B }, (before, after) => Math.Abs(before - after)).Max();
+        Check(channelDelta <= 2, "피크 종료 전후 무지개색이 연속적으로 유지");
 
         Console.WriteLine($"피크 시간 검증 {checks}개 통과");
     }
