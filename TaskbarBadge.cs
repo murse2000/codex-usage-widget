@@ -646,11 +646,12 @@ internal sealed class TaskbarBadge : IDisposable
             if (m.Msg == 0x007B && ContextMenuStrip is { } menu)
             {
                 var keyboard = m.LParam == new IntPtr(-1);
-                // 메뉴 창의 배율 문맥에서 위치를 읽어 탐색기와의 배율 차이를 해소한다.
+                // 메뉴 위치는 비동기로 띄우기 전에 화면 좌표로 확정한다. 이후 배지 버튼이 교체돼도 메뉴 요청이 사라지지 않는다.
+                var screenPoint = keyboard ? PointToScreen(new Point(Width / 2, Height / 2)) : Cursor.Position;
                 menu.BeginInvoke((Action)(() =>
                 {
-                    if (IsDisposed || menu.IsDisposed) return;
-                    menu.Show(this, keyboard ? new Point(Width / 2, Height / 2) : PointToClient(Cursor.Position));
+                    if (menu.IsDisposed) return;
+                    menu.Show(screenPoint);
                     Native.SetForegroundWindow(menu.Handle);
                 }));
                 return;

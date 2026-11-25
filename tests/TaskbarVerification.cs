@@ -117,6 +117,7 @@ internal static class TaskbarVerification
         using var icon = new Icon("assets/Widget.ico");
         using var menu = new ContextMenuStrip();
         menu.Items.Add("검증 메뉴");
+        VerifyContextMenuSurvivesButtonRecreation(icon);
         VerifyRenderingColumnPositions(icon);
         var clicked = false;
         using var badge = (IDisposable)Activator.CreateInstance(Badge, Flags, null, new object[] { icon, menu, (Action)(() => clicked = true) }, null)!;
@@ -226,6 +227,25 @@ internal static class TaskbarVerification
         VerifyEmptyUpdateDuringQueryStaysHidden(icon, menu);
         VerifyTimerExceptionDoesNotEscape();
         Console.WriteLine($"작업표시줄 검증 {checks}개 통과");
+    }
+
+    private static void VerifyContextMenuSurvivesButtonRecreation(Icon icon)
+    {
+        using var menu = new ContextMenuStrip();
+        menu.Items.Add("검증 메뉴");
+        using var badge = CreateBadge(icon, menu);
+        Invoke(badge, "Update", Rows(("Codex", new object?[] { Cell("5시간", 73, "(245분)"), Cell("주간", 54, "(59시간)"), null })));
+        Invoke(badge, "Start");
+        Wait(() => Button(badge) is { Visible: true });
+        var button = Button(badge)!;
+        var client = new Point(button.Width / 2, button.Height / 2);
+        var lParam = new IntPtr((client.Y << 16) | (client.X & 0xFFFF));
+        SendMessage(button.Handle, 0x007B, IntPtr.Zero, lParam);
+        button.Dispose();
+        var deadline = DateTime.UtcNow.AddSeconds(3);
+        while (!menu.Visible && DateTime.UtcNow < deadline) { Application.DoEvents(); Thread.Sleep(20); }
+        Check(menu.Visible, "버튼 교체 직후에도 우클릭 메뉴 표시");
+        menu.Close();
     }
 
     private static void VerifyRenderingColumnPositions(Icon icon)
