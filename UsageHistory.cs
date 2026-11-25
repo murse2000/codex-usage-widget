@@ -107,13 +107,30 @@ internal static class UsageHistorySeries
     {
         var cutoff = now.ToUnixTimeSeconds() - (long)range.TotalSeconds;
         var nowUnix = now.ToUnixTimeSeconds();
-        return points
+        var ordered = points
             .Where(point => point.TimestampUtc >= cutoff && point.TimestampUtc <= nowUnix)
-            .GroupBy(point => new { point.Service, point.Key, point.Label, point.ResetsAt })
-            .Select(group => new UsageHistorySegment(group.Key.Service, group.Key.Key, group.Key.Label, group.Key.ResetsAt,
-                Downsample(group.OrderBy(point => point.TimestampUtc).ToArray(), maxPoints)))
-            .OrderBy(segment => segment.Points[0].TimestampUtc)
+            .OrderBy(point => point.Service)
+            .ThenBy(point => point.Key)
+            .ThenBy(point => point.TimestampUtc)
             .ToArray();
+        var groups = new List<List<UsageHistoryPoint>>();
+        List<UsageHistoryPoint>? group = null;
+        foreach (var point in ordered)
+        {
+            if (group is null || group[^1].Service != point.Service || group[^1].Key != point.Key
+                || group[^1].ResetsAt != point.ResetsAt)
+            {
+                group = new List<UsageHistoryPoint>();
+                groups.Add(group);
+            }
+            group.Add(point);
+        }
+        return groups.Select(points =>
+        {
+            var first = points[0];
+            return new UsageHistorySegment(first.Service, first.Key, first.Label, first.ResetsAt,
+                Downsample(points.ToArray(), maxPoints));
+        }).ToArray();
     }
 
     internal static IReadOnlyList<UsageHistoryPoint> Downsample(IReadOnlyList<UsageHistoryPoint> points, int maxPoints)
@@ -123,14 +140,26 @@ internal static class UsageHistorySeries
         var minimum = 0;
         for (var index = 1; index < points.Count; index++)
             if (points[index].Remaining < points[minimum].Remaining) minimum = index;
-        var selected = new SortedSet<int> { 0, minimum };
-        if (maxPoints >= 3) selected.Add(points.Count - 1);
-        if (selected.Count > maxPoints)
+        if (maxPoints < 3)
         {
-            selected.Remove(points.Count - 1);
-            if (selected.Count > maxPoints) selected.Remove(minimum);
+            var selected = new SortedSet<int> { 0 };
+            if (maxPoints == 2) selected.Add(minimum);
+            return selected.Select(index => points[index]).ToArray();
         }
-        for (var index = 1; selected.Count < maxPoints && index < points.Count - 1; index++) selected.Add(index);
-        return selected.Select(index => points[index]).ToArray();
+        var last = points.Count - 1;
+        var sampled = new SortedSet<int>();
+        for (var slot = 0; slot < maxPoints; slot++)
+            sampled.Add((int)((long)slot * last / (maxPoints - 1)));
+        if (!sampled.Contains(minimum))
+        {
+            var replacement = sampled
+                .Where(index => index != 0 && index != last)
+                .OrderBy(index => Math.Abs(index - minimum))
+                .ThenBy(index => index)
+                .First();
+            sampled.Remove(replacement);
+            sampled.Add(minimum);
+        }
+        return sampled.Select(index => points[index]).ToArray();
     }
 }

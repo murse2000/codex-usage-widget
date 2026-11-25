@@ -18,6 +18,7 @@ internal static class DiagnosticsVerification
             VerifyConcurrentWrites(directory);
             VerifyEmptyUi(directory);
             VerifyPopulatedUi(directory);
+            VerifyLatestProcessId(directory);
         }
         finally
         {
@@ -169,6 +170,20 @@ internal static class DiagnosticsVerification
         FindControl<Button>(form, "refreshButton")!.PerformClick();
         Application.DoEvents();
         Check(FindControl<Label>(form, "workingSetValue")!.Text == "128.0 MB", "새로고침 후 현재 수치 유지");
+        form.Close();
+    }
+
+    private static void VerifyLatestProcessId(string root)
+    {
+        var directory = TestDirectory(root, "latest-pid");
+        var now = DateTimeOffset.Now;
+        var path = Path.Combine(directory, $"diagnostics-{DateOnly.FromDateTime(now.UtcDateTime):yyyyMMdd}.jsonl");
+        WriteRefresh(path, now.AddMinutes(-2), workingSet: 100, privateBytes: 120, codexProcessId: 4321);
+        WriteRefresh(path, now.AddMinutes(-1), workingSet: 110, privateBytes: 130);
+        using var form = new DiagnosticsForm(new PerformanceDiagnostics(directory));
+        form.Show();
+        Application.DoEvents();
+        Check(FindControl<Label>(form, "processIdValue")!.Text == "—", "최신 샘플에 PID가 없으면 과거 PID를 현재처럼 표시하지 않음");
         form.Close();
     }
 

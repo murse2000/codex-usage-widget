@@ -148,8 +148,10 @@ internal static class Program
                     SaveImage(form, $"main-{dpi}-{codexRows}-{goRows}.png");
                 }
                 CheckGoHidden(form);
+                CheckSparseTaskbarColumns(form);
                 CheckHistoryIntegration(form);
                 CheckAlertPolicyIntegration(form);
+                CheckAlertNotificationGate();
                 CheckDiagnosticsIntegration(form);
                 CheckPicker(form, dpi);
             }
@@ -294,6 +296,37 @@ internal static class Program
         => ((IEnumerable)FormType.GetMethod("TaskbarRows", Private)!.Invoke(form, null)!).Cast<object>().ToList();
     private static string Service(object row) => (string)row.GetType().GetProperty("Service")!.GetValue(row)!;
 
+    private static void CheckSparseTaskbarColumns(Form form)
+    {
+        var settings = FormType.GetField("settings", Private)!.GetValue(form)!;
+        settings.GetType().GetProperty("ShowCodex")!.SetValue(settings, false);
+        settings.GetType().GetProperty("ShowOpenCodeGo")!.SetValue(settings, true);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        void SetGo(params string[] keys)
+        {
+            var windows = keys.Select(key => new GoUsageWindow(key, key switch
+            {
+                "rolling" => "5시간 한도", "weekly" => "주간 한도", _ => "월간 한도"
+            }, 10, key == "rolling" ? 300 : key == "weekly" ? 10080 : 0, now)).ToArray();
+            FormType.GetField("goWindows", Private)!.SetValue(form, windows);
+            Fit(form);
+        }
+
+        SetGo("rolling", "monthly");
+        var split = TaskbarRows(form).Cast<TaskbarBadge.Row>().ToArray();
+        Check(split.Length == 2 && split[0].Cells[0] is not null && split[1].Cells[1] is null && split[1].Cells[2] is not null,
+            "5시간·월간만 있을 때도 월간을 세 번째 열에 표시");
+        SetGo("weekly", "monthly");
+        split = TaskbarRows(form).Cast<TaskbarBadge.Row>().ToArray();
+        Check(split.Length == 2 && split[0].Cells[1] is not null && split[1].Cells[1] is null && split[1].Cells[2] is not null,
+            "주간·월간만 있을 때도 주간을 두 번째 열에 표시");
+        SetGo("monthly");
+        var single = TaskbarRows(form).Cast<TaskbarBadge.Row>().Single();
+        Check(single.Cells[2] is not null, "월간만 있을 때도 세 번째 열 위치 유지");
+        settings.GetType().GetProperty("ShowCodex")!.SetValue(settings, true);
+        SetState(form, 2, 3);
+    }
+
     private static void CheckHistoryIntegration(Form form)
     {
         SetState(form, 2, 3);
@@ -323,6 +356,15 @@ internal static class Program
         foreach (var owned in form.OwnedForms.OfType<AlertPolicyForm>()) owned.Close();
     }
 
+    private static void CheckAlertNotificationGate()
+    {
+        var method = FormType.GetMethod("ShouldShowUsageAlerts", Private)
+            ?? throw new InvalidOperationException("ShouldShowUsageAlerts not found");
+        Check(!(bool)method.Invoke(null, new object[] { false, 1 })!, "설정 저장 실패 시 사용량 알림 전송 억제");
+        Check((bool)method.Invoke(null, new object[] { true, 1 })!, "설정 저장 성공 시 사용량 알림 전송");
+        Check(!(bool)method.Invoke(null, new object[] { true, 0 })!, "전송할 사용량 알림이 없으면 표시하지 않음");
+    }
+
     private static void CheckDiagnosticsIntegration(Form form)
     {
         Check(form.ContextMenuStrip!.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == "성능 진단…"),
@@ -349,7 +391,7 @@ internal static class Program
                 true, (Action<bool>)(value => codexEnabled = value),
                 true, (Action<bool>)(value => goEnabled = value),
                 (Func<string, Task<string?>>)(_ => Task.FromResult<string?>(null)),
-                (Action)(() => cleared = true),
+                (Func<string?>)(() => { cleared = true; return null; }),
                 "키 없음 · OpenCode Go 숨김"
             })!;
             picker.Location = new Point(owner.Left, owner.Top);

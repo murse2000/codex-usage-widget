@@ -17,7 +17,9 @@ internal sealed class AlertPolicySettings
     public Dictionary<string, AlertPolicy> Policies { get; set; } = new();
 
     internal AlertPolicy Get(string key)
-        => Policies is not null && Policies.TryGetValue(key, out var policy) ? policy.Normalize() : AlertPolicy.Default;
+        => Policies is not null && Policies.TryGetValue(key, out var policy) && policy is not null
+            ? policy.Normalize()
+            : AlertPolicy.Default;
 
     internal void Set(string key, AlertPolicy policy)
     {
@@ -36,7 +38,8 @@ internal sealed class AlertPolicySettings
     internal void Normalize()
     {
         Policies ??= new();
-        foreach (var key in Policies.Keys.ToArray()) Policies[key] = Policies[key].Normalize();
+        foreach (var key in Policies.Keys.ToArray())
+            Policies[key] = Policies[key]?.Normalize() ?? AlertPolicy.Default;
     }
 }
 

@@ -112,7 +112,8 @@ internal static class GoVerification
                 Check((bool)settings.GetType().GetProperty("ShowCodex")!.GetValue(settings)!, "서비스 표시 저장 실패 시 이전 값 유지");
                 settings.GetType().GetProperty("OpenCodeGoKey")!.SetValue(settings, "encrypted");
                 FormType.GetField("goApiKey", Instance)!.SetValue(form, "old-key");
-                FormType.GetMethod("ClearGoKey", Instance)!.Invoke(form, null);
+                var clearResult = FormType.GetMethod("ClearGoKey", Instance)!.Invoke(form, null) as string;
+                Check(clearResult is not null, "키 삭제 저장 실패 결과를 호출부에 전달");
                 Check(FormType.GetField("goApiKey", Instance)!.GetValue(form) as string == "old-key",
                     "키 삭제 저장 실패 시 이전 키 유지");
             }

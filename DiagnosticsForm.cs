@@ -150,8 +150,7 @@ internal sealed class DiagnosticsForm : GlassForm
         uiaValue.Text = lastUia?.UiaMilliseconds is { } uia
             ? $"{uia} ms · {DateTimeOffset.FromUnixTimeSeconds(lastUia.TimestampUtc).ToLocalTime():HH:mm:ss}"
             : "—";
-        var processId = points.LastOrDefault(point => point.CodexProcessId is not null);
-        processIdValue.Text = processId?.CodexProcessId?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "—";
+        processIdValue.Text = latest.CodexProcessId?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "—";
         serviceValue.Text = $"Codex {(latest.CodexOk ? "정상" : "실패")} · Go {(latest.GoOk ? "정상" : "실패")}";
         sampleSummary.Text = $"샘플 {points.Length}개 · 최근 {DateTimeOffset.FromUnixTimeSeconds(latest.TimestampUtc).ToLocalTime():M/d HH:mm:ss}";
     }

@@ -51,6 +51,17 @@ internal static class AlertPolicyVerification
         Check(settings.Get("codex:300").WarningPercent == 25 && settings.Get("go:weekly").WarningPercent == 30,
             "구간별 정책 조회와 기본값");
 
+        const string nestedNullPolicyJson = """{"AlertPolicies":{"Policies":{"codex:300":null}}}""";
+        var nestedNullSettings = System.Text.Json.JsonSerializer.Deserialize<AlertPolicySettingsDocument>(nestedNullPolicyJson)!.AlertPolicies;
+        Check(nestedNullSettings.Policies["codex:300"] is null, "JSON의 중첩 null 정책 역직렬화");
+        Check(nestedNullSettings.Get("codex:300") == AlertPolicy.Default,
+            "JSON의 중첩 null 정책 조회 시 기본값 사용");
+        nestedNullSettings.Normalize();
+        Check(!nestedNullSettings.Policies.Values.Any(value => value is null),
+            "JSON의 중첩 null 정책 정규화");
+        Check(nestedNullSettings.Get("codex:300") == AlertPolicy.Default,
+            "JSON의 중첩 null 정책 정규화 후 기본값 사용");
+
         var quiet = new AlertQuietHours { Enabled = true, StartHour = 22, EndHour = 8 };
         Check(quiet.IsQuiet(new DateTimeOffset(2026, 11, 26, 23, 0, 0, TimeSpan.Zero)), "자정을 넘는 방해 금지 시작");
         Check(quiet.IsQuiet(new DateTimeOffset(2026, 11, 27, 7, 0, 0, TimeSpan.Zero)), "자정을 넘는 방해 금지 종료");
@@ -93,5 +104,10 @@ internal static class AlertPolicyVerification
     {
         if (!condition) throw new InvalidOperationException(name);
         checks++;
+    }
+
+    private sealed class AlertPolicySettingsDocument
+    {
+        public AlertPolicySettings AlertPolicies { get; set; } = new();
     }
 }

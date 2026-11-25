@@ -33,6 +33,32 @@ internal static class HistoryVerification
             Check(segments[0].ResetsAt == 100 && segments[0].Points.Count == 2, "첫 리셋 주기 기록");
             Check(segments[1].ResetsAt == 200 && segments[1].Points.Count == 2, "새 리셋 주기 기록");
 
+            var repeatedCycles = new[]
+            {
+                Sample(2, 70, 100),
+                Sample(1, 85, 300, "주간", "Codex", "weekly"),
+                Sample(0, 90, 100),
+                Sample(1, 80, 200),
+                Sample(1, 60, 900, "5시간", "OpenCode Go", "rolling")
+            };
+            var repeatedSegments = UsageHistorySeries.Build(repeatedCycles, TimeSpan.FromHours(24), now, 200)
+                .Where(segment => segment.Service == "Codex" && segment.Key == "300")
+                .ToArray();
+            Check(repeatedSegments.Select(segment => segment.ResetsAt).SequenceEqual(new long[] { 100, 200, 100 })
+                && repeatedSegments.All(segment => segment.Points.Count == 1),
+                "A-B-A 리셋 주기를 비연속 segment로 분리");
+            Check(repeatedSegments.Select(segment => segment.Points[0].Remaining).SequenceEqual(new[] { 90, 80, 70 }),
+                "다른 서비스·구간과 섞여도 구간별 시간순 정렬");
+
+            var relabeled = new[]
+            {
+                Sample(0, 90, 100, "5시간"),
+                Sample(1, 80, 100, "5시간 상세")
+            };
+            var relabeledSegments = UsageHistorySeries.Build(relabeled, TimeSpan.FromHours(24), now, 200);
+            Check(relabeledSegments.Count == 1 && relabeledSegments[0].Points.Count == 2,
+                "Label 변경만으로 리셋 주기 segment 분리하지 않음");
+
             var samples = new[]
             {
                 Sample(0, 90), Sample(1, 10), Sample(2, 80), Sample(3, 70), Sample(4, 60)
@@ -40,6 +66,17 @@ internal static class HistoryVerification
             var reduced = UsageHistorySeries.Downsample(samples, 3);
             Check(reduced.Select(point => point.Remaining).SequenceEqual(new[] { 90, 10, 60 }),
                 "다운샘플링이 첫값·최소값·마지막값 보존");
+
+            var longSamples = Enumerable.Range(0, 1001)
+                .Select(index => Sample(index, index == 950 ? 100 : index / 20))
+                .ToArray();
+            var reducedLong = UsageHistorySeries.Downsample(longSamples, 21);
+            Check(reducedLong.Select(point => (point.TimestampUtc - longSamples[0].TimestampUtc) / 60)
+                .SequenceEqual(new long[] { 0, 50, 100, 150, 200, 250, 300, 350, 400, 450, 500, 550, 600, 650, 700, 750, 800, 850, 900, 950, 1000 }),
+                "긴 시계열을 전체 구간에서 균등하게 다운샘플링");
+            Check(reducedLong.Select(point => point.Remaining)
+                .SequenceEqual(new[] { 0, 2, 5, 7, 10, 12, 15, 17, 20, 22, 25, 27, 30, 32, 35, 37, 40, 42, 45, 100, 50 }),
+                "후반부 추세와 spike 다운샘플링에서 보존");
 
             using (var form = new UsageHistoryForm(store))
             {
@@ -80,9 +117,10 @@ internal static class HistoryVerification
         Console.WriteLine($"히스토리 검증 {checks}개 통과");
     }
 
-    private static UsageHistoryPoint Sample(int minute, int remaining)
+    private static UsageHistoryPoint Sample(int minute, int remaining, long resetsAt = 100,
+        string label = "5시간", string service = "Codex", string key = "300")
         => new(new DateTimeOffset(2026, 11, 25, 10, 0, 0, TimeSpan.Zero).AddMinutes(minute).ToUnixTimeSeconds(),
-            "Codex", "300", "5시간", remaining, 100);
+            service, key, label, remaining, resetsAt);
 
     private static void Check(bool condition, string name)
     {

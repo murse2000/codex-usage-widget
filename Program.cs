@@ -330,7 +330,8 @@ internal sealed class UsageForm : GlassForm
             FitUsageLayout();
             KeepOnScreen(Screen.FromControl(this));
             var settingsSaved = AlertStateTransaction.Apply(settings.Alerts, alertChanges, SavePosition);
-            if (alerts.Count > 0) tray.ShowBalloonTip(10000, "사용량 알림", string.Join("\n", alerts), ToolTipIcon.Warning);
+            if (ShouldShowUsageAlerts(settingsSaved, alerts.Count))
+                tray.ShowBalloonTip(10000, "사용량 알림", string.Join("\n", alerts), ToolTipIcon.Warning);
             UpdateTrayText();
             taskbarBadge.Update(TaskbarRows(), codexStale || goStale);
             if (!settingsSaved)
@@ -595,13 +596,18 @@ internal sealed class UsageForm : GlassForm
         // 서비스가 하나만 남아도 한 줄에 큰 글자로 늘어나지 않도록 첫 구간과 나머지를 두 줄로 나눈다.
         if (rows.Count != 1) return rows;
         var only = rows[0];
-        var cells = only.Cells.Where(cell => cell is not null).Select(cell => cell!).ToList();
-        if (cells.Count < 2) return rows;
+        var original = only.Cells.ToArray();
+        var populated = original.Select((cell, index) => (cell, index)).Where(item => item.cell is not null).ToArray();
+        if (populated.Length < 2) return rows;
+        var firstIndex = populated[0].index;
+        var first = new TaskbarBadge.Cell?[3];
         var second = new TaskbarBadge.Cell?[3];
-        for (var index = 1; index < cells.Count && index < second.Length; index++) second[index] = cells[index];
+        for (var index = 0; index < original.Length && index < 3; index++) second[index] = original[index];
+        first[firstIndex] = original[firstIndex];
+        second[firstIndex] = null;
         return new[]
         {
-            new TaskbarBadge.Row(only.Service, new TaskbarBadge.Cell?[] { cells[0], null, null }),
+            new TaskbarBadge.Row(only.Service, first),
             new TaskbarBadge.Row(string.Empty, second)
         };
     }
@@ -961,6 +967,9 @@ internal sealed class UsageForm : GlassForm
         ? Color.FromArgb(199, 58, 69)
         : remaining < 30 ? Color.FromArgb(173, 109, 20) : Accent;
 
+    private static bool ShouldShowUsageAlerts(bool settingsSaved, int alertCount)
+        => settingsSaved && alertCount > 0;
+
     private static int EvaluateAlert(WidgetSettings settings, string key, int remaining, long resetsAt,
         List<AlertStateChange> changes)
     {
@@ -1251,7 +1260,7 @@ internal sealed class UsageForm : GlassForm
         return null;
     }
 
-    private void ClearGoKey()
+    private string? ClearGoKey()
     {
         Interlocked.Increment(ref goKeyGeneration);
         var previousKey = settings.OpenCodeGoKey;
@@ -1275,12 +1284,13 @@ internal sealed class UsageForm : GlassForm
             goStale = previousStale;
             goRateLimited = previousRateLimit;
             status.Text = "설정 저장 실패";
-            return;
+            return "설정 저장 실패";
         }
         status.Text = StatusText();
         FitUsageLayout();
         UpdateTrayText();
         taskbarBadge.Update(TaskbarRows(), codexStale || goStale);
+        return null;
     }
 
     private void ShowUsageHistory()
@@ -1467,7 +1477,7 @@ internal sealed class UsageForm : GlassForm
 
         public OpacityPicker(double current, Action<double> onChange, bool startupEnabled, Action<bool> onStartupChange,
             bool alwaysOnTop, Action<bool> onTopMostChange, bool codexEnabled, Action<bool> onCodexChange,
-            bool goEnabled, Action<bool> onGoChange, Func<string, Task<string?>> onSaveKey, Action onClearKey, string keyStatusText)
+            bool goEnabled, Action<bool> onGoChange, Func<string, Task<string?>> onSaveKey, Func<string?> onClearKey, string keyStatusText)
         {
             SuspendLayout();
             AutoScaleDimensions = new SizeF(96, 96);
@@ -1633,10 +1643,19 @@ internal sealed class UsageForm : GlassForm
             };
             clearKey.Click += (_, _) =>
             {
-                onClearKey();
-                keyBox.Clear();
-                keyStatusLabel.Text = "키 없음 · OpenCode Go 숨김";
-                keyStatusLabel.ForeColor = Muted;
+                var error = onClearKey();
+                if (IsDisposed) return;
+                if (error is null)
+                {
+                    keyBox.Clear();
+                    keyStatusLabel.Text = "키 없음 · OpenCode Go 숨김";
+                    keyStatusLabel.ForeColor = Muted;
+                }
+                else
+                {
+                    keyStatusLabel.Text = error;
+                    keyStatusLabel.ForeColor = Color.FromArgb(173, 109, 20);
+                }
             };
             ResumeLayout(true);
         }
