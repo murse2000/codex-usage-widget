@@ -14,6 +14,7 @@
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="LayoutVerification" />
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
     <Compile Remove="tests\**\*.cs" />
     <EmbeddedResource Include="assets\Widget.ico" LogicalName="CodexUsageWidget.Widget.ico" />

@@ -1,5 +1,6 @@
 using System.Collections;
 using System.Reflection;
+using CodexUsageWidget;
 
 internal static class Program
 {
@@ -14,6 +15,13 @@ internal static class Program
     {
         Application.SetUnhandledExceptionMode(UnhandledExceptionMode.ThrowException);
         ApplicationConfiguration.Initialize();
+        if (!args.Contains("--tibo-delivery"))
+        {
+            var dataRoot = Path.GetFullPath(Path.Combine("obj", "verification-data"));
+            if (Directory.Exists(dataRoot)) Directory.Delete(dataRoot, recursive: true);
+            Directory.CreateDirectory(dataRoot);
+            Environment.SetEnvironmentVariable("CODEX_USAGE_WIDGET_DATA_DIR", dataRoot);
+        }
         if (args.Contains("--update-worker"))
         {
             try { UpdateVerification.InstallWorker(args[1], args[2]); }
@@ -58,6 +66,11 @@ internal static class Program
         if (args.Contains("--peak"))
         {
             PeakVerification.Run();
+            return;
+        }
+        if (args.Contains("--history"))
+        {
+            HistoryVerification.Run();
             return;
         }
         var settingsPath = (string)FormType.GetField("SettingsPath", Private)!.GetValue(null)!;
@@ -122,6 +135,7 @@ internal static class Program
                     SaveImage(form, $"main-{dpi}-{codexRows}-{goRows}.png");
                 }
                 CheckGoHidden(form);
+                CheckHistoryIntegration(form);
                 CheckPicker(form, dpi);
             }
         }
@@ -262,6 +276,21 @@ internal static class Program
     private static List<object> TaskbarRows(Form form)
         => ((IEnumerable)FormType.GetMethod("TaskbarRows", Private)!.Invoke(form, null)!).Cast<object>().ToList();
     private static string Service(object row) => (string)row.GetType().GetProperty("Service")!.GetValue(row)!;
+
+    private static void CheckHistoryIntegration(Form form)
+    {
+        SetState(form, 2, 3);
+        var capture = FormType.GetMethod("CaptureHistoryPoints", Private)
+            ?? throw new InvalidOperationException("CaptureHistoryPoints not found");
+        var points = ((IEnumerable)capture.Invoke(form, null)!).Cast<UsageHistoryPoint>().ToArray();
+        Check(points.Length == 5, "Codex·Go 성공 사용량을 히스토리 포인트로 변환");
+        Check(points.All(point => point.Remaining is >= 0 and <= 100), "히스토리 잔여량 범위");
+        FormType.GetMethod("RecordUsageHistory", Private)!.Invoke(form, new object[] { points });
+        var stored = new UsageHistoryStore(AppPaths.DataDirectory).Load(TimeSpan.FromDays(1), DateTimeOffset.Now);
+        Check(stored.Count >= 5, "성공 사용량 히스토리 저장");
+        Check(form.ContextMenuStrip!.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == "사용량 기록·그래프"),
+            "트레이에 히스토리 진입점 표시");
+    }
 
     private static void CheckPicker(Form owner, int dpi)
     {

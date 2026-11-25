@@ -102,7 +102,8 @@ internal sealed class UsageForm : GlassForm
     private readonly NotifyIcon tray = new() { Text = "Codex 사용량" };
     private readonly TaskbarBadge taskbarBadge;
     private readonly WidgetSettings settings = LoadSettings();
-    private static readonly string SettingsPath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageWidget", "settings.json");
+    private readonly UsageHistoryStore usageHistory = new();
+    private static readonly string SettingsPath = AppPaths.SettingsPath;
     private string? goApiKey;
     private Process? codexProcess;
     private int codexRequestId;
@@ -112,6 +113,7 @@ internal sealed class UsageForm : GlassForm
     private bool goStale;
     private bool goAuthFailed;
     private bool goRateLimited;
+    private bool historySaveFailed;
     private bool refreshing;
     private bool checkingTibo;
     private DateTimeOffset nextTiboCheck;
@@ -325,8 +327,10 @@ internal sealed class UsageForm : GlassForm
             if (IsDisposed) return;
 
             var alerts = new List<string>();
-            if (settings.ShowCodex) ApplyCodex(codexTask.Result, alerts);
-            if (settings.ShowOpenCodeGo) ApplyGo(goTask.Result, alerts);
+            var history = new List<UsageHistoryPoint>();
+            if (settings.ShowCodex) ApplyCodex(codexTask.Result, alerts, history);
+            if (settings.ShowOpenCodeGo) ApplyGo(goTask.Result, alerts, history);
+            RecordUsageHistory(history);
 
             status.Text = StatusText();
             FitUsageLayout();
@@ -391,7 +395,7 @@ internal sealed class UsageForm : GlassForm
         catch (Exception error) { return new(default, error); }
     }
 
-    private void ApplyCodex(FetchResult<UsageSnapshot> result, List<string> alerts)
+    private void ApplyCodex(FetchResult<UsageSnapshot> result, List<string> alerts, List<UsageHistoryPoint> history)
     {
         if (result.Value is { } usage)
         {
@@ -400,6 +404,8 @@ internal sealed class UsageForm : GlassForm
             foreach (var window in new[] { usage.Primary, usage.Secondary }.OfType<UsageWindow>())
             {
                 var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
+                history.Add(new UsageHistoryPoint(DateTimeOffset.UtcNow.ToUnixTimeSeconds(), "Codex",
+                    window.DurationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture), WindowName(window.DurationMinutes), remaining, window.ResetsAt));
                 var threshold = RecordAlert(settings, $"codex:{window.DurationMinutes}", remaining, window.ResetsAt);
                 if (threshold > 0) alerts.Add($"{WindowName(window.DurationMinutes)} 잔여량이 {threshold}% 미만입니다. (현재 {remaining}%)");
             }
@@ -411,7 +417,7 @@ internal sealed class UsageForm : GlassForm
         RenderCodex();
     }
 
-    private void ApplyGo(FetchResult<IReadOnlyList<GoUsageWindow>> result, List<string> alerts)
+    private void ApplyGo(FetchResult<IReadOnlyList<GoUsageWindow>> result, List<string> alerts, List<UsageHistoryPoint> history)
     {
         if (result.Value is { } windows)
         {
@@ -422,6 +428,7 @@ internal sealed class UsageForm : GlassForm
             foreach (var window in windows)
             {
                 var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
+                history.Add(new UsageHistoryPoint(DateTimeOffset.UtcNow.ToUnixTimeSeconds(), "Go", window.Key, window.Label, remaining, window.ResetsAt));
                 var threshold = RecordAlert(settings, $"go:{window.Key}", remaining, window.ResetsAt);
                 if (threshold > 0) alerts.Add($"OpenCode Go {window.Label} 잔여량이 {threshold}% 미만입니다. (현재 {remaining}%)");
             }
@@ -445,6 +452,39 @@ internal sealed class UsageForm : GlassForm
             goRateLimited = false;
         }
         RenderGo();
+    }
+
+    private IReadOnlyList<UsageHistoryPoint> CaptureHistoryPoints()
+    {
+        var points = new List<UsageHistoryPoint>(5);
+        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (codexUsage is { } codex)
+        {
+            foreach (var window in new[] { codex.Primary, codex.Secondary }.OfType<UsageWindow>())
+                points.Add(new UsageHistoryPoint(timestamp, "Codex",
+                    window.DurationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture), WindowName(window.DurationMinutes),
+                    100 - Math.Clamp(window.UsedPercent, 0, 100), window.ResetsAt));
+        }
+        if (goWindows is { } go)
+        {
+            foreach (var window in go)
+                points.Add(new UsageHistoryPoint(timestamp, "Go", window.Key, window.Label,
+                    100 - Math.Clamp(window.UsedPercent, 0, 100), window.ResetsAt));
+        }
+        return points;
+    }
+
+    private void RecordUsageHistory(IReadOnlyList<UsageHistoryPoint>? points = null)
+    {
+        try
+        {
+            usageHistory.Record(points ?? CaptureHistoryPoints());
+            historySaveFailed = false;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            historySaveFailed = true;
+        }
     }
 
     private void RenderCodex()
@@ -501,6 +541,7 @@ internal sealed class UsageForm : GlassForm
         if (settings.ShowOpenCodeGo && goAuthFailed) text += " · Go 키 인증 실패";
         else if (settings.ShowOpenCodeGo && goRateLimited) text += " · Go 요청 제한";
         else if (settings.ShowOpenCodeGo && goStale) text += " · Go 조회 실패";
+        if (historySaveFailed) text += " · 기록 저장 실패";
         return text;
     }
 
@@ -915,6 +956,7 @@ internal sealed class UsageForm : GlassForm
         var toggle = new ToolStripMenuItem("위젯 숨기기", null, (_, _) => ToggleVisibility());
         menu.Items.Add(toggle);
         menu.Items.Add("새로고침", null, async (_, _) => await RefreshUsageAsync());
+        menu.Items.Add("사용량 기록·그래프", null, (_, _) => ShowUsageHistory());
         menu.Items.Add("위젯 설정", null, (_, _) => { ShowWidget(); ShowOpacityPicker(); });
         var services = new ToolStripMenuItem("표시 서비스");
         var codexItem = new ToolStripMenuItem("Codex") { CheckOnClick = true, Checked = settings.ShowCodex };
@@ -1166,6 +1208,19 @@ internal sealed class UsageForm : GlassForm
         FitUsageLayout();
         UpdateTrayText();
         taskbarBadge.Update(TaskbarRows());
+    }
+
+    private void ShowUsageHistory()
+    {
+        if (OwnedForms.OfType<UsageHistoryForm>().FirstOrDefault(form => !form.IsDisposed) is { } existing)
+        {
+            existing.BringToFront();
+            existing.Activate();
+            return;
+        }
+        var history = new UsageHistoryForm(usageHistory);
+        history.Show(this);
+        history.BringToFront();
     }
 
     private void ShowOpacityPicker()
