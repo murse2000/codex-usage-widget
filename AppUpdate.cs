@@ -142,6 +142,9 @@ internal static class AppUpdate
         start.Environment["PSModulePath"] = Path.Combine(Path.GetDirectoryName(start.FileName)!, "Modules");
         foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-JobPath", job })
             start.ArgumentList.Add(argument);
+        // 이전 실패한 작업의 상태 파일을 남기지 않아 ready와 helper-error를 새 helper의 신호로만 해석한다.
+        foreach (var name in new[] { "ready", "installed", "recovered", "helper-error" })
+            File.Delete(Path.Combine(directory, name));
         using var helper = Process.Start(start) ?? throw new IOException("업데이트 설치 도우미를 실행하지 못했습니다.");
         var helperError = helper.StandardError.ReadToEndAsync();
         var deadline = DateTime.UtcNow.AddSeconds(30);
@@ -151,9 +154,22 @@ internal static class AppUpdate
             {
                 if (!helper.HasExited) helper.Kill(true);
                 await helper.WaitForExitAsync();
-                throw new IOException($"업데이트 설치 도우미가 준비되지 않았습니다. 기존 버전은 유지됩니다. (종료 코드 {helper.ExitCode})\n" + await helperError);
+                var reason = ReadHelperError(directory);
+                throw new IOException($"업데이트 설치 도우미가 준비되지 않았습니다. 기존 버전은 유지됩니다. (종료 코드 {helper.ExitCode})\n{reason}\n" + await helperError);
             }
             await Task.Delay(100);
         }
+        // ready 직후 반환해야 호출자가 Close()하여 helper의 WaitForExit()가 진행된다.
+        // 설치 완료 여부는 기다리지 않고, 종료 이후 실패 복구와 recovered/helper-error 기록은 helper가 담당한다.
+    }
+
+    private static string ReadHelperError(string directory)
+    {
+        try
+        {
+            var path = Path.Combine(directory, "helper-error");
+            return File.Exists(path) ? File.ReadAllText(path).Trim() : "";
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return ""; }
     }
 }

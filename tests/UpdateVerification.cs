@@ -51,6 +51,8 @@ internal static class UpdateVerification
         VerifyConsent();
         VerifyInstaller(root, fixture, false);
         VerifyInstaller(root, fixture, true);
+        VerifyReadyFailureRestarts(root, fixture);
+        VerifyRollbackFailureRestarts(root, fixture);
         Console.WriteLine($"업데이트 검증 {checks}개 통과");
     }
 
@@ -103,7 +105,8 @@ internal static class UpdateVerification
         using var worker = Process.Start(start)!;
         var errors = worker.StandardError.ReadToEndAsync();
         if (!worker.WaitForExit(40000)) { worker.Kill(true); worker.WaitForExit(); }
-        Check(worker.ExitCode == 0, "종료 대기 도우미 준비 · " + damaged + (worker.ExitCode == 0 ? "" : " · " + errors.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult()));
+        var error = errors.GetAwaiter().GetResult();
+        Check(worker.ExitCode == 0, "종료 대기 도우미 준비 · " + damaged + (worker.ExitCode == 0 ? "" : " · " + error));
         WaitUntil(() => File.Exists(Path.Combine(installed, "restarted")), 15000);
         Check(File.Exists(Path.Combine(installed, "restarted")), damaged ? "재실행 실패 시 기존 버전 복구·재실행" : "잠긴 파일의 종료 후 교체·재실행");
         Check(Hash(target) == (damaged ? original : wanted), damaged ? "복구 파일 원본 해시 일치" : "설치 파일 새 해시 일치");
@@ -119,6 +122,130 @@ internal static class UpdateVerification
             return !Directory.Exists(stage);
         }, 10000);
         Check(!Directory.Exists(stage), "설치 임시 파일 정리 · " + damaged);
+    }
+
+    private static void VerifyRollbackFailureRestarts(string root, string fixture)
+    {
+        var installed = CreateInstallDirectory(root, fixture);
+        var target = Path.Combine(installed, "CodexUsageWidget.exe");
+        var stage = CreateStage();
+        var payload = Path.Combine(stage, "CodexUsageWidget.exe");
+        File.Copy(target, payload);
+        using (var stream = new FileStream(payload, FileMode.Append)) stream.WriteByte(0);
+        // 메시지 상자 없이 독립적인 롤백·재실행 try/catch와 실제 파일 교체를 재현한다.
+        File.WriteAllText(Path.Combine(stage, "InstallUpdate.ps1"), RollbackFailureHarness(), new UTF8Encoding(true));
+        CreateJob(stage, target);
+        // ready는 설치 완료가 아니라 앱 종료를 허용하는 준비 신호다.
+        File.WriteAllText(Path.Combine(stage, "ready"), "ready");
+
+        var result = RunPowerShell(stage);
+        Check(result.ExitCode == 0, "롤백 실패 설치 helper 종료");
+        Check(File.Exists(Path.Combine(stage, "failure")) && File.ReadAllText(Path.Combine(stage, "failure")).Contains("기존 버전 복구 실패: replace destination", StringComparison.Ordinal), "롤백 실패 원인 격리 검증");
+        Check(File.Exists(Path.Combine(stage, "recovery-restarted")), "롤백 실패와 별개로 기존 버전 재실행");
+    }
+
+    private static void VerifyReadyFailureRestarts(string root, string fixture)
+    {
+        var installed = CreateInstallDirectory(root, fixture);
+        var target = Path.Combine(installed, "CodexUsageWidget.exe");
+        var stage = CreateStage();
+        var payload = Path.Combine(stage, "CodexUsageWidget.exe");
+        File.Copy(target, payload);
+        using (var stream = new FileStream(payload, FileMode.Append)) stream.WriteByte(0);
+        File.WriteAllText(Path.Combine(stage, "InstallUpdate.ps1"), ReadyFailureHarness(), new UTF8Encoding(true));
+        // helper가 현재 테스트 프로세스의 30초 종료 대기에서 실패하도록 job만 격리 디렉터리에 만든다.
+        CreateJob(stage, target, Environment.ProcessId, Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks);
+
+        var result = RunInstallerWorker(stage, target);
+        Check(result.ExitCode == 0, "ready 이후 C#은 설치 완료를 기다리지 않고 정상 종료");
+        Check(result.Error.Length == 0, "ready 직후 C# 반환으로 helper가 부모 종료를 감지");
+        WaitUntil(() => File.Exists(Path.Combine(installed, "restarted")), 15000);
+        Check(File.Exists(Path.Combine(installed, "restarted")), "ready 이후 helper 실패 시 기존 버전 재실행");
+    }
+
+    private static string CreateInstallDirectory(string root, string fixture)
+    {
+        var installed = Path.Combine(root, "복구 시험 " + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(installed);
+        foreach (var file in Directory.GetFiles(fixture)) File.Copy(file, Path.Combine(installed, Path.GetFileName(file)));
+        var target = Path.Combine(installed, "CodexUsageWidget.exe");
+        File.Copy(Path.Combine(fixture, "UpdateFixture.exe"), target);
+        return installed;
+    }
+
+    private static string CreateStage()
+    {
+        var stage = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageWidget", "updates", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(stage);
+        return stage;
+    }
+
+    private static void CreateJob(string stage, string target, int processId = int.MaxValue, long startedTicks = 0)
+    {
+        var payload = Path.Combine(stage, "CodexUsageWidget.exe");
+        File.WriteAllText(Path.Combine(stage, "job.json"), JsonSerializer.Serialize(new
+        {
+            Target = target,
+            Source = payload,
+            Hash = Hash(payload),
+            ProcessId = processId,
+            StartedTicks = startedTicks
+        }));
+    }
+
+    private static string ReadyFailureHarness() =>
+        "param([Parameter(Mandatory = $true)][string]$JobPath)\n" +
+        "$job = Get-Content -LiteralPath $JobPath -Raw -Encoding UTF8 | ConvertFrom-Json\n" +
+        "$directory = Split-Path -LiteralPath $JobPath\n" +
+        "[IO.File]::WriteAllText((Join-Path $directory 'ready'), 'ready')\n" +
+        "$parent = Get-Process -Id $job.ProcessId -ErrorAction SilentlyContinue\n" +
+        "if ($null -ne $parent -and -not $parent.WaitForExit(30000)) { throw '30초 종료 대기 시간 초과' }\n";
+
+    private static string RollbackFailureHarness() =>
+        "param([Parameter(Mandatory = $true)][string]$JobPath)\n" +
+        "$job = Get-Content -LiteralPath $JobPath -Raw -Encoding UTF8 | ConvertFrom-Json\n" +
+        "$target = [IO.Path]::GetFullPath($job.Target)\n" +
+        "$incoming = $target + '.incoming'\n" +
+        "$backup = $target + '.backup'\n" +
+        "$replaced = $false\n" +
+        "try {\n" +
+        "    [IO.File]::Copy($job.Source, $incoming, $false)\n" +
+        "    [IO.File]::Replace($incoming, $target, $backup)\n" +
+        "    $replaced = $true\n" +
+        "    throw 'replace destination'\n" +
+        "}\n" +
+        "catch {\n" +
+        "    $failure = $_.Exception.Message\n" +
+        "    try {\n" +
+        "        if ($replaced) { throw 'replace destination' }\n" +
+        "    }\n" +
+        "    catch { $failure += \"`n기존 버전 복구 실패: \" + $_.Exception.Message }\n" +
+        "    [IO.File]::WriteAllText((Join-Path (Split-Path -Parent $JobPath) 'recovery-restarted'), 'yes')\n" +
+        "    [IO.File]::WriteAllText((Join-Path (Split-Path -Parent $JobPath) 'failure'), $failure)\n" +
+        "}\n";
+
+    private static (int ExitCode, string Error) RunInstallerWorker(string stage, string target)
+    {
+        var start = new ProcessStartInfo(Environment.ProcessPath!) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+        foreach (var arg in new[] { "--update-worker", stage, target }) start.ArgumentList.Add(arg);
+        using var worker = Process.Start(start)!;
+        var errors = worker.StandardError.ReadToEndAsync();
+        if (!worker.WaitForExit(40000)) { worker.Kill(true); worker.WaitForExit(); }
+        return (worker.ExitCode, errors.GetAwaiter().GetResult());
+    }
+
+    private static (int ExitCode, string Output, string Error) RunPowerShell(string stage)
+    {
+        var start = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe"))
+            { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        start.Environment["PSModulePath"] = Path.Combine(Path.GetDirectoryName(start.FileName)!, "Modules");
+        foreach (var argument in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", Path.Combine(stage, "InstallUpdate.ps1"), "-JobPath", Path.Combine(stage, "job.json") })
+            start.ArgumentList.Add(argument);
+        using var helper = Process.Start(start)!;
+        var output = helper.StandardOutput.ReadToEndAsync();
+        var error = helper.StandardError.ReadToEndAsync();
+        if (!helper.WaitForExit(40000)) { helper.Kill(true); helper.WaitForExit(); }
+        return (helper.ExitCode, output.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult(), error.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult());
     }
 
     private static void VerifyConsent()
