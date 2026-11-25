@@ -375,6 +375,27 @@ internal static class Program
         foreach (var owned in form.OwnedForms.OfType<DiagnosticsForm>()) owned.Close();
     }
 
+    private static void CheckPickerDrag(Form picker, FlowLayoutPanel layout)
+    {
+        var header = layout.Controls.OfType<Panel>().First();
+        var title = header.Controls.OfType<Label>().Single(label => label.Text == "위젯 설정");
+        var mover = new FakeWindowMover();
+        var previous = WidgetFormStyle.WindowMover;
+        try
+        {
+            WidgetFormStyle.WindowMover = mover;
+            RaiseMouseDown(header, MouseButtons.Left);
+            RaiseMouseDown(title, MouseButtons.Left);
+            RaiseMouseDown(layout, MouseButtons.Left);
+            Check(mover.Handles.Count == 3 && mover.Handles.All(handle => handle == picker.Handle),
+                "실제 위젯 설정 창 헤더·제목·상단 여백이 설정 창으로 이동 요청");
+        }
+        finally
+        {
+            WidgetFormStyle.WindowMover = previous;
+        }
+    }
+
     private static void CheckPicker(Form owner, int dpi)
     {
         var type = FormType.GetNestedType("OpacityPicker", BindingFlags.NonPublic)!;
@@ -399,6 +420,7 @@ internal static class Program
             picker.Show(owner);
             Application.DoEvents();
             var layout = picker.Controls.OfType<FlowLayoutPanel>().Single();
+            if (fontScale == 1f) CheckPickerDrag(picker, layout);
             var fonts = new List<Font>();
             try
             {

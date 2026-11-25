@@ -87,6 +87,13 @@ internal static class AlertPolicyVerification
                 "다섯 구간의 경고·위험·반복 설정");
             Check(form.Controls.OfType<TableLayoutPanel>().Single().Controls.OfType<CheckBox>().Count() == 5,
                 "구간별 알림 사용 여부");
+            var quietPanel = form.Controls.OfType<Panel>().Single(panel => panel.Controls.OfType<CheckBox>()
+                .Any(check => check.Text == "방해 금지 사용"));
+            Check(quietPanel.Controls.Cast<Control>().All(control => control.Left >= quietPanel.Padding.Left
+                && control.Right <= quietPanel.Width - quietPanel.Padding.Right
+                && control.Top >= quietPanel.Padding.Top
+                && control.Bottom <= quietPanel.Height - quietPanel.Padding.Bottom),
+                "방해 금지 컨트롤이 패널 패딩 안쪽에 표시");
             Directory.CreateDirectory("obj/layout-verification");
             using (var bitmap = new Bitmap(form.Width, form.Height))
             {

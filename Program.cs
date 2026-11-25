@@ -1491,6 +1491,7 @@ internal sealed class UsageForm : GlassForm
                 Padding = new Padding(15),
                 BackColor = Color.Transparent
             };
+            layout.MouseDown += WidgetFormStyle.DragWindow;
             Controls.Add(layout);
             Text = "위젯 설정";
             var header = new DraggablePanel { Size = new Size(210, 28), Margin = new Padding(0, 0, 0, 8), BackColor = Color.Transparent };
