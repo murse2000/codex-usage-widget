@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 
 namespace CodexUsageWidget;
@@ -37,7 +38,13 @@ internal static class OpenCodeGoUsage
         ("monthly", "monthly", "월간 한도", 0)
     };
 
-    internal static async Task<IReadOnlyList<GoUsageWindow>> ReadAsync(HttpClient client, string apiKey)
+    private static readonly TimeSpan DefaultTimeout = TimeSpan.FromSeconds(15);
+
+    internal static Task<IReadOnlyList<GoUsageWindow>> ReadAsync(HttpClient client, string apiKey)
+        => ReadAsync(client, apiKey, DefaultTimeout, CancellationToken.None);
+
+    internal static async Task<IReadOnlyList<GoUsageWindow>> ReadAsync(HttpClient client, string apiKey, TimeSpan timeout,
+        CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(apiKey)) throw new OpenCodeGoNotConfiguredException();
         using var request = new HttpRequestMessage(HttpMethod.Get, Endpoint);
@@ -45,14 +52,27 @@ internal static class OpenCodeGoUsage
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
         request.Headers.UserAgent.ParseAdd($"CodexUsageWidget/{AppUpdate.CurrentVersion.ToString(3)}");
         request.Headers.TryAddWithoutValidation("x-opencode-session", "codex-usage-widget");
-        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead).ConfigureAwait(false);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(timeout);
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
         if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) throw new OpenCodeGoAuthException();
         if (response.StatusCode == HttpStatusCode.TooManyRequests)
             throw new OpenCodeGoRateLimitException();
         response.EnsureSuccessStatusCode();
         if (response.Content.Headers.ContentLength > MaximumResponseSize)
             throw new InvalidDataException("OpenCode Go 응답이 허용 크기를 초과했습니다.");
-        return Parse(await response.Content.ReadAsStringAsync().ConfigureAwait(false));
+
+        using var stream = await response.Content.ReadAsStreamAsync(deadline.Token).ConfigureAwait(false);
+        using var buffer = new MemoryStream();
+        var chunk = new byte[8192];
+        int read;
+        while ((read = await stream.ReadAsync(chunk.AsMemory(0, chunk.Length), deadline.Token).ConfigureAwait(false)) > 0)
+        {
+            if (buffer.Length + read > MaximumResponseSize)
+                throw new InvalidDataException("OpenCode Go 응답이 허용 크기를 초과했습니다.");
+            buffer.Write(chunk, 0, read);
+        }
+        return Parse(Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length));
     }
 
     internal static IReadOnlyList<GoUsageWindow> Parse(string json)

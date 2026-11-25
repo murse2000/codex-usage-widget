@@ -58,6 +58,15 @@ internal static class GoVerification
         Check(Read(new HttpClient(new StubHandler(HttpStatusCode.OK, Fixture)), "") is { } missing
             && missing.GetType().Name == "OpenCodeGoNotConfiguredException", "빈 키는 미설정으로 구분");
 
+        var oversized = Fixture + new string(' ', 262144);
+        using (var client = new HttpClient(new StubHandler(HttpStatusCode.OK, oversized, unknownLength: true)))
+            Check(Read(client) is InvalidDataException, "Content-Length 없는 초과 응답 거부");
+        using (var client = new HttpClient(new StubHandler(HttpStatusCode.OK, oversized, declaredLength: 1)))
+            Check(Read(client) is InvalidDataException, "실제보다 작은 Content-Length 우회 거부");
+        using (var client = new HttpClient(new StubHandler(HttpStatusCode.OK, "", stalled: true)))
+            Check(Read(client, timeout: TimeSpan.FromMilliseconds(150)) is OperationCanceledException,
+                "본문 지연 시 전체 요청 timeout 적용");
+
         var secret = App.GetType("CodexUsageWidget.SecretStore")!;
         var protect = secret.GetMethod("Protect", Static)!;
         var unprotect = secret.GetMethod("Unprotect", Static)!;
@@ -131,12 +140,21 @@ internal static class GoVerification
     private static List<object> Parse(string json)
         => ((IEnumerable)Usage.GetMethod("Parse", Static)!.Invoke(null, new object[] { json })!).Cast<object>().ToList();
 
-    private static Exception? Read(HttpClient client, string key = "test-key")
+    private static Exception? Read(HttpClient client, string key = "test-key", TimeSpan? timeout = null)
     {
-        var task = (Task)Usage.GetMethod("ReadAsync", Static)!.Invoke(null, new object[] { client, key })!;
+        var parameterTypes = timeout is null
+            ? new[] { typeof(HttpClient), typeof(string) }
+            : new[] { typeof(HttpClient), typeof(string), typeof(TimeSpan), typeof(CancellationToken) };
+        var method = Usage.GetMethod("ReadAsync", Static, null, parameterTypes, null)
+            ?? throw new InvalidOperationException("OpenCodeGoUsage.ReadAsync overload not found");
+        var args = timeout is null
+            ? new object[] { client, key }
+            : new object[] { client, key, timeout.Value, CancellationToken.None };
+        var task = (Task)method.Invoke(null, args)!;
         try
         {
-            task.GetAwaiter().GetResult();
+            if (timeout is not null) task.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult();
+            else task.GetAwaiter().GetResult();
             return null;
         }
         catch (Exception error)
@@ -172,11 +190,17 @@ internal static class GoVerification
     {
         private readonly HttpStatusCode status;
         private readonly string body;
+        private readonly bool unknownLength;
+        private readonly int? declaredLength;
+        private readonly bool stalled;
 
-        internal StubHandler(HttpStatusCode status, string body)
+        internal StubHandler(HttpStatusCode status, string body, bool unknownLength = false, int? declaredLength = null, bool stalled = false)
         {
             this.status = status;
             this.body = body;
+            this.unknownLength = unknownLength;
+            this.declaredLength = declaredLength;
+            this.stalled = stalled;
         }
 
         internal HttpRequestMessage? Request { get; private set; }
@@ -185,7 +209,63 @@ internal static class GoVerification
         {
             Request = new HttpRequestMessage(request.Method, request.RequestUri);
             foreach (var header in request.Headers) Request.Headers.TryAddWithoutValidation(header.Key, header.Value);
-            return Task.FromResult(new HttpResponseMessage(status) { Content = new StringContent(body) });
+            HttpContent content = stalled
+                ? new StalledContent()
+                : declaredLength is { } length
+                    ? new FixedLengthContent(body, length)
+                    : unknownLength ? new UnknownLengthContent(body) : new StringContent(body);
+            return Task.FromResult(new HttpResponseMessage(status) { Content = content });
         }
+    }
+
+    private class UnknownLengthContent : HttpContent
+    {
+        private readonly byte[] bytes;
+
+        internal UnknownLengthContent(string value)
+        {
+            bytes = System.Text.Encoding.UTF8.GetBytes(value);
+        }
+
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+            => stream.WriteAsync(bytes, 0, bytes.Length);
+    }
+
+    private sealed class FixedLengthContent : UnknownLengthContent
+    {
+        internal FixedLengthContent(string value, int length) : base(value) => Headers.ContentLength = length;
+    }
+
+    private sealed class StalledContent : HttpContent
+    {
+        protected override bool TryComputeLength(out long length)
+        {
+            length = 0;
+            return false;
+        }
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+            => Task.Delay(Timeout.Infinite);
+
+        protected override Task<Stream> CreateContentReadStreamAsync(CancellationToken cancellationToken)
+            => Task.FromResult<Stream>(new StalledStream());
+    }
+
+    private sealed class StalledStream : MemoryStream
+    {
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            await Task.Delay(Timeout.Infinite, cancellationToken);
+            return 0;
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+            => ReadAsync(buffer.AsMemory(offset, count), cancellationToken).AsTask();
     }
 }
