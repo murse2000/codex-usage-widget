@@ -35,7 +35,7 @@ jobs:
           $version = $project.Project.PropertyGroup.Version
           if ($env:RELEASE_TAG -ne "v$version") { throw 'Tag does not match project version' }
           $head = (git rev-parse HEAD).Trim()
-          $tagCommit = (git rev-parse "refs/tags/$env:RELEASE_TAG").Trim()
+          $tagCommit = (git rev-parse "refs/tags/$($env:RELEASE_TAG)^{}").Trim()
           if ($head -ne $tagCommit) { throw 'Checked out commit does not match release tag' }
       - name: Build and package
         shell: pwsh
