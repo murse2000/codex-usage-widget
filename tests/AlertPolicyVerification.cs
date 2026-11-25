@@ -87,11 +87,6 @@ internal static class AlertPolicyVerification
                 "다섯 구간의 경고·위험·반복 설정");
             Check(form.Controls.OfType<TableLayoutPanel>().Single().Controls.OfType<CheckBox>().Count() == 5,
                 "구간별 알림 사용 여부");
-            var header = form.Controls.OfType<Panel>().Single(panel => panel.Controls.OfType<Label>()
-                .Any(label => label.Text == "알림 정책"));
-            var heading = header.Controls.OfType<Label>().Single(label => label.Text == "알림 정책");
-            Check(ControlEventVerification.HasDragHandler(header) && ControlEventVerification.HasDragHandler(heading),
-                "알림 정책 헤더와 제목에 창 이동 연결");
             Directory.CreateDirectory("obj/layout-verification");
             using (var bitmap = new Bitmap(form.Width, form.Height))
             {

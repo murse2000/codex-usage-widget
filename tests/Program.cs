@@ -104,6 +104,7 @@ internal static class Program
             CheckNullSettingsNormalized(settingsPath);
             CheckCorruptSettingsIsolated(settingsPath);
             CheckBadgeTime();
+            CheckWindowDragBehavior();
             CheckHiddenLayout(form);
             CheckShowMessage(form);
             foreach (var screen in Screen.AllScreens)
@@ -398,10 +399,6 @@ internal static class Program
             picker.Show(owner);
             Application.DoEvents();
             var layout = picker.Controls.OfType<FlowLayoutPanel>().Single();
-            var settingsHeader = layout.Controls.OfType<Panel>().First();
-            var settingsTitle = settingsHeader.Controls.OfType<Label>().Single(label => label.Text == "위젯 설정");
-            Check(ControlEventVerification.HasDragHandler(settingsHeader) && ControlEventVerification.HasDragHandler(settingsTitle),
-                "위젯 설정 헤더와 제목에 창 이동 연결");
             var fonts = new List<Font>();
             try
             {
@@ -463,6 +460,58 @@ internal static class Program
                 foreach (var font in fonts) font.Dispose();
             }
         }
+    }
+
+    private static void CheckWindowDragBehavior()
+    {
+        using var form = new Form { ShowInTaskbar = false };
+        var closed = 0;
+        var header = WidgetFormStyle.CreateHeader("이동 테스트", 240, () => closed++);
+        form.Controls.Add(header);
+        form.Show();
+        Application.DoEvents();
+        var heading = header.Controls.OfType<Label>().Single(label => label.Text == "이동 테스트");
+        var close = header.Controls.OfType<Button>().Single();
+        var mover = new FakeWindowMover();
+        var previous = WidgetFormStyle.WindowMover;
+        try
+        {
+            WidgetFormStyle.WindowMover = mover;
+            RaiseMouseDown(header, MouseButtons.Left);
+            RaiseMouseDown(heading, MouseButtons.Left);
+            Check(mover.Handles.Count == 2 && mover.Handles.All(handle => handle == form.Handle),
+                "헤더·제목 왼쪽 클릭이 속한 창으로 이동 요청");
+            RaiseMouseDown(header, MouseButtons.Right);
+            RaiseMouseDown(heading, MouseButtons.Right);
+            close.PerformClick();
+            Check(mover.Handles.Count == 2 && closed == 1, "오른쪽 클릭·닫기 버튼은 이동 요청하지 않음");
+            mover.Handles.Clear();
+            var settingsHeader = new DraggablePanel();
+            var settingsTitle = new DraggableLabel();
+            WidgetFormStyle.EnableDrag(settingsHeader, settingsTitle);
+            settingsHeader.Controls.Add(settingsTitle);
+            form.Controls.Add(settingsHeader);
+            RaiseMouseDown(settingsHeader, MouseButtons.Left);
+            RaiseMouseDown(settingsTitle, MouseButtons.Left);
+            Check(mover.Handles.Count == 2 && mover.Handles.All(handle => handle == form.Handle),
+                "위젯 설정 공통 이동 연결이 실제 창으로 요청");
+        }
+        finally
+        {
+            WidgetFormStyle.WindowMover = previous;
+        }
+    }
+
+    private static void RaiseMouseDown(Control control, MouseButtons button)
+    {
+        var method = control.GetType().GetMethod("OnMouseDown", BindingFlags.Instance | BindingFlags.NonPublic);
+        method!.Invoke(control, new object[] { new MouseEventArgs(button, 1, 0, 0, 0) });
+    }
+
+    private sealed class FakeWindowMover : IWindowMover
+    {
+        internal List<IntPtr> Handles { get; } = new();
+        public bool Move(IntPtr handle) { Handles.Add(handle); return true; }
     }
 
     private static void CheckDirectDispose()

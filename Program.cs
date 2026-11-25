@@ -166,11 +166,11 @@ internal sealed class UsageForm : GlassForm
         var header = new Panel { Location = new Point(1, 1), Size = new Size(250, 25), BackColor = Color.Transparent };
         header.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
         Controls.Add(header);
-        header.MouseDown += DragWindow;
+        header.MouseDown += WidgetFormStyle.DragWindow;
 
         var brand = new Label { Text = "사용량", Font = new Font("Segoe UI", 9, FontStyle.Bold), ForeColor = TextColor, Location = new Point(14, 2), Size = new Size(80, 19), BackColor = Color.Transparent };
         header.Controls.Add(brand);
-        brand.MouseDown += DragWindow;
+        brand.MouseDown += WidgetFormStyle.DragWindow;
 
         StyleButton(refreshButton, new Point(202, 2), new Size(20, 20));
         refreshButton.Click += async (_, _) => await RefreshUsageAsync();
@@ -1401,13 +1401,6 @@ internal sealed class UsageForm : GlassForm
         }
     }
 
-    private static void DragWindow(object? sender, MouseEventArgs e)
-    {
-        if (e.Button != MouseButtons.Left) return;
-        Native.ReleaseCapture();
-        Native.SendMessage(ActiveForm!.Handle, 0xA1, 0x2, 0);
-    }
-
     private sealed record UsageWindow(int UsedPercent, int DurationMinutes, long ResetsAt);
     private sealed record UsageSnapshot(UsageWindow Primary, UsageWindow? Secondary);
 
@@ -1709,8 +1702,6 @@ internal sealed class UsageForm : GlassForm
 
     private static class Native
     {
-        [DllImport("user32.dll")] internal static extern bool ReleaseCapture();
-        [DllImport("user32.dll")] internal static extern IntPtr SendMessage(IntPtr handle, int message, int wParam, int lParam);
         [DllImport("kernel32.dll")] internal static extern IntPtr GetCurrentProcess();
         [DllImport("psapi.dll")] internal static extern bool EmptyWorkingSet(IntPtr process);
     }

@@ -89,11 +89,7 @@ internal static class HistoryVerification
                 Check(form.Text == "사용량 기록", "히스토리 창 제목");
                 var header = form.Controls.OfType<Panel>().Single(panel => panel.Controls.OfType<Label>()
                     .Any(label => label.Text == "사용량 기록"));
-                var heading = header.Controls.OfType<Label>().Single(label => label.Text == "사용량 기록");
-                Check(ControlEventVerification.HasDragHandler(header) && ControlEventVerification.HasDragHandler(heading),
-                    "히스토리 헤더와 제목에 창 이동 연결");
-                var closeButton = form.Controls.OfType<Panel>().Single(panel => panel.Controls.OfType<Button>().Any())
-                    .Controls.OfType<Button>().Single();
+                var closeButton = header.Controls.OfType<Button>().Single();
                 Check(closeButton.Visible && closeButton.Right <= closeButton.Parent!.Width && closeButton.Left >= 0,
                     "히스토리 창 닫기 버튼 표시");
                 Directory.CreateDirectory("obj/layout-verification");
@@ -104,11 +100,23 @@ internal static class HistoryVerification
                 }
                 form.Close();
             }
-            using (var empty = new UsageHistoryForm(new UsageHistoryStore(Path.Combine(directory, "empty"))))
+            var emptyStore = new UsageHistoryStore(Path.Combine(directory, "empty"));
+            using (var empty = new UsageHistoryForm(emptyStore))
             {
                 empty.Show();
                 Application.DoEvents();
                 Check(empty.Controls.OfType<HistoryChart>().Any(), "기록이 없어도 빈 그래프 표시");
+                var emptySummary = empty.Controls.OfType<Label>().Single(label => label.Text.Contains("기록이 없습니다", StringComparison.Ordinal));
+                emptyStore.Record(new[]
+                {
+                    new UsageHistoryPoint(DateTimeOffset.UtcNow.ToUnixTimeSeconds(), "Codex", "10080", "주간 한도", 96, 1)
+                });
+                empty.Controls.OfType<FlowLayoutPanel>().Single().Controls.OfType<Button>()
+                    .Single(button => button.Text == "새로고침").PerformClick();
+                Application.DoEvents();
+                Check(!emptySummary.Text.Contains("기록이 없습니다", StringComparison.Ordinal), "수동 새로고침으로 최신 사용량 그래프 반영");
+                var timerField = typeof(UsageHistoryForm).GetField("refreshTimer", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Check(timerField?.GetValue(empty) is System.Windows.Forms.Timer { Enabled: true }, "그래프 창 자동 갱신 타이머 사용");
                 empty.Close();
             }
 

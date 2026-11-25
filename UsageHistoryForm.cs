@@ -10,6 +10,7 @@ internal sealed class UsageHistoryForm : GlassForm
     private readonly ComboBox windowBox = WidgetFormStyle.CreateComboBox();
     private readonly Label summary = new();
     private readonly HistoryChart chart = new();
+    private readonly System.Windows.Forms.Timer refreshTimer = new() { Interval = 30_000 };
 
     internal UsageHistoryForm(UsageHistoryStore store)
     {
@@ -42,6 +43,12 @@ internal sealed class UsageHistoryForm : GlassForm
         AddFilter(filters, "기간", rangeBox);
         AddFilter(filters, "서비스", serviceBox);
         AddFilter(filters, "구간", windowBox);
+        var refreshButton = WidgetFormStyle.CreateButton("새로고침");
+        refreshButton.Margin = new Padding(4, 18, 0, 0);
+        refreshButton.Click += (_, _) => Rebuild();
+        filters.Controls.Add(refreshButton);
+        refreshTimer.Tick += (_, _) => { if (!IsDisposed) Rebuild(); };
+        refreshTimer.Start();
 
         summary.Dock = DockStyle.Top;
         summary.Height = 24;
@@ -60,6 +67,16 @@ internal sealed class UsageHistoryForm : GlassForm
         Rebuild();
     }
 
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            refreshTimer.Stop();
+            refreshTimer.Dispose();
+        }
+        base.Dispose(disposing);
+    }
+
     private void AddFilter(FlowLayoutPanel layout, string label, ComboBox box)
     {
         var group = new Panel { Size = new Size(112, 45), Margin = new Padding(0, 0, 6, 0), BackColor = Color.Transparent };
@@ -76,12 +93,22 @@ internal sealed class UsageHistoryForm : GlassForm
     {
         var range = rangeBox.SelectedIndex switch { 0 => TimeSpan.FromHours(24), 1 => TimeSpan.FromDays(7), _ => TimeSpan.FromDays(30) };
         var now = DateTimeOffset.Now;
-        var points = store.Load(range, now).Where(point => Matches(point)).ToArray();
+        IReadOnlyList<UsageHistoryPoint> points;
+        try
+        {
+            points = store.Load(range, now).Where(point => Matches(point)).ToArray();
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            summary.Text = "사용량 기록을 읽지 못했습니다. 잠시 후 다시 시도합니다.";
+            chart.SetData(Array.Empty<UsageHistorySegment>(), now, range);
+            return;
+        }
         var segments = UsageHistorySeries.Build(points, range, now, 240);
         chart.SetData(segments, now, range);
-        summary.Text = points.Length == 0
+        summary.Text = points.Count == 0
             ? "아직 기록이 없습니다. 사용량을 갱신하면 추세가 쌓입니다."
-            : $"기록 {points.Length}개 · 최근 {DateTimeOffset.FromUnixTimeSeconds(points[^1].TimestampUtc).ToLocalTime():M/d HH:mm}";
+            : $"기록 {points.Count}개 · 최근 {DateTimeOffset.FromUnixTimeSeconds(points[^1].TimestampUtc).ToLocalTime():M/d HH:mm}";
     }
 
     private bool Matches(UsageHistoryPoint point)
