@@ -1500,8 +1500,8 @@ internal sealed class UsageForm : GlassForm
             };
             Controls.Add(layout);
             Text = "위젯 설정";
-            var header = new Panel { Size = new Size(210, 28), Margin = new Padding(0, 0, 0, 8), BackColor = Color.Transparent };
-            var title = new Label { Text = "위젯 설정", AutoSize = true, Location = new Point(0, 3), Font = new Font("Segoe UI", 9, FontStyle.Bold), BackColor = Color.Transparent };
+            var header = new DraggablePanel { Size = new Size(210, 28), Margin = new Padding(0, 0, 0, 8), BackColor = Color.Transparent };
+            var title = new DraggableLabel { Text = "위젯 설정", AutoSize = true, Location = new Point(0, 3), Font = new Font("Segoe UI", 9, FontStyle.Bold), BackColor = Color.Transparent };
             var close = new IconButton(IconButton.Icon.Close) { Size = new Size(24, 24), Location = new Point(186, 0),
                 Anchor = AnchorStyles.Top | AnchorStyles.Right, FlatStyle = FlatStyle.Flat, ForeColor = Muted, AccessibleName = "설정 닫기" };
             close.FlatAppearance.BorderSize = 0;
@@ -1509,8 +1509,7 @@ internal sealed class UsageForm : GlassForm
             close.Click += (_, _) => Close();
             header.Controls.Add(title);
             header.Controls.Add(close);
-            header.MouseDown += DragWindow;
-            title.MouseDown += DragWindow;
+            WidgetFormStyle.EnableDrag(header, title);
             layout.Controls.Add(header);
             valueLabel.Text = $"투명도  {Math.Round(current * 100)}%";
             valueLabel.Font = new Font("Segoe UI", 8.5f);

@@ -87,6 +87,11 @@ internal static class HistoryVerification
                     "히스토리 범위·서비스·구간 선택");
                 Check(form.Controls.OfType<HistoryChart>().Any(), "히스토리 그래프 표시");
                 Check(form.Text == "사용량 기록", "히스토리 창 제목");
+                var header = form.Controls.OfType<Panel>().Single(panel => panel.Controls.OfType<Label>()
+                    .Any(label => label.Text == "사용량 기록"));
+                var heading = header.Controls.OfType<Label>().Single(label => label.Text == "사용량 기록");
+                Check(ControlEventVerification.HasDragHandler(header) && ControlEventVerification.HasDragHandler(heading),
+                    "히스토리 헤더와 제목에 창 이동 연결");
                 var closeButton = form.Controls.OfType<Panel>().Single(panel => panel.Controls.OfType<Button>().Any())
                     .Controls.OfType<Button>().Single();
                 Check(closeButton.Visible && closeButton.Right <= closeButton.Parent!.Width && closeButton.Left >= 0,

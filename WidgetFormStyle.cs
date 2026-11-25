@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace CodexUsageWidget;
 
 internal static class WidgetFormStyle
@@ -11,8 +13,8 @@ internal static class WidgetFormStyle
 
     internal static Panel CreateHeader(string title, int formWidth, Action close)
     {
-        var header = new Panel { Dock = DockStyle.Top, Height = 30, BackColor = Color.Transparent };
-        var heading = new Label
+        var header = new DraggablePanel { Dock = DockStyle.Top, Height = 30, BackColor = Color.Transparent };
+        var heading = new DraggableLabel
         {
             Text = title,
             AutoSize = true,
@@ -40,8 +42,28 @@ internal static class WidgetFormStyle
         closeButton.Click += (_, _) => close();
         header.Controls.Add(heading);
         header.Controls.Add(closeButton);
+        EnableDrag(header, heading);
         return header;
     }
+
+    internal static void EnableDrag(Control header, Control title)
+    {
+        if (header is IDragSource source) source.DragRequested += (_, e) => DragWindow(header, e);
+        else header.MouseDown += DragWindow;
+        if (title is IDragSource sourceTitle) sourceTitle.DragRequested += (_, e) => DragWindow(title, e);
+        else title.MouseDown += DragWindow;
+    }
+
+    private static void DragWindow(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left || sender is not Control control || control.FindForm() is not { IsDisposed: false } form)
+            return;
+        ReleaseCapture();
+        SendMessage(form.Handle, 0xA1, 0x2, 0);
+    }
+
+    [DllImport("user32.dll")] private static extern bool ReleaseCapture();
+    [DllImport("user32.dll")] private static extern IntPtr SendMessage(IntPtr handle, int message, int wParam, int lParam);
 
     internal static Label CreateFilterLabel(string text) => new()
     {
@@ -78,4 +100,34 @@ internal static class WidgetFormStyle
         FlatStyle = FlatStyle.Flat,
         BackColor = FieldColor
     };
+}
+
+internal interface IDragSource
+{
+    event MouseEventHandler? DragRequested;
+    bool HasDragHandler { get; }
+}
+
+internal sealed class DraggablePanel : Panel, IDragSource
+{
+    public event MouseEventHandler? DragRequested;
+    public bool HasDragHandler => DragRequested is not null;
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button == MouseButtons.Left) DragRequested?.Invoke(this, e);
+    }
+}
+
+internal sealed class DraggableLabel : Label, IDragSource
+{
+    public event MouseEventHandler? DragRequested;
+    public bool HasDragHandler => DragRequested is not null;
+
+    protected override void OnMouseDown(MouseEventArgs e)
+    {
+        base.OnMouseDown(e);
+        if (e.Button == MouseButtons.Left) DragRequested?.Invoke(this, e);
+    }
 }

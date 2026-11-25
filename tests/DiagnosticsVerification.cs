@@ -131,6 +131,11 @@ internal static class DiagnosticsVerification
         Check(chart is { Visible: true, Width: > 0, Height: > 0 }, "기록이 없어도 24시간 추세 영역 표시");
         Check(form.Controls.OfType<Panel>().SelectMany(panel => panel.Controls.OfType<Button>()).Any(button => button.Text == "×"),
             "공통 헤더의 닫기 버튼 사용");
+        var header = form.Controls.OfType<Panel>().Single(panel => panel.Controls.OfType<Label>()
+            .Any(label => label.Text == "성능 진단"));
+        var heading = header.Controls.OfType<Label>().Single(label => label.Text == "성능 진단");
+        Check(ControlEventVerification.HasDragHandler(header) && ControlEventVerification.HasDragHandler(heading),
+            "성능 진단 헤더와 제목에 창 이동 연결");
         Check(FindControl<Button>(form, "refreshButton") is { Text: "새로고침" }, "공통 스타일의 새로고침 버튼 사용");
         Check(FindControl<Label>(form, "sampleSummary")!.Text.Contains("기록이 없습니다", StringComparison.Ordinal),
             "기록이 없는 경우 정상 안내 문구 표시");

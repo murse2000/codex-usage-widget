@@ -398,6 +398,10 @@ internal static class Program
             picker.Show(owner);
             Application.DoEvents();
             var layout = picker.Controls.OfType<FlowLayoutPanel>().Single();
+            var settingsHeader = layout.Controls.OfType<Panel>().First();
+            var settingsTitle = settingsHeader.Controls.OfType<Label>().Single(label => label.Text == "위젯 설정");
+            Check(ControlEventVerification.HasDragHandler(settingsHeader) && ControlEventVerification.HasDragHandler(settingsTitle),
+                "위젯 설정 헤더와 제목에 창 이동 연결");
             var fonts = new List<Font>();
             try
             {
