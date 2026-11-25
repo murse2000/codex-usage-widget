@@ -39,13 +39,14 @@ try {
 }
 catch {
     $failure = $_.Exception.Message
-    $restartTargets = @($target)
-    if ($replaced -and (Test-Path -LiteralPath $backup)) { $restartTargets = @($backup, $target) }
     # 롤백과 재실행은 독립적으로 시도한다. 백업 이동이 막혀도 가능한 실행 파일로 복구한다.
     if ($replaced) {
         try { [IO.File]::Replace($backup, $target, $incoming) }
         catch { $failure += "`n기존 버전 복구 실패: " + $_.Exception.Message }
     }
+    # 롤백이 성공하면 백업은 이미 소모됐으므로 target만 재실행한다.
+    $restartTargets = @($target)
+    if ($replaced -and (Test-Path -LiteralPath $backup)) { $restartTargets = @($backup, $target) }
     $recoveryStarted = $false
     foreach ($candidate in $restartTargets) {
         try {

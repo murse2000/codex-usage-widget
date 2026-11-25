@@ -128,39 +128,48 @@ internal static class UpdateVerification
     {
         var installed = CreateInstallDirectory(root, fixture);
         var target = Path.Combine(installed, "CodexUsageWidget.exe");
-        var stage = CreateStage();
+        var original = Hash(target);
+        var stage = CreateIsolatedStage(root);
         var payload = Path.Combine(stage, "CodexUsageWidget.exe");
         File.Copy(target, payload);
         using (var stream = new FileStream(payload, FileMode.Append)) stream.WriteByte(0);
-        // 메시지 상자 없이 독립적인 롤백·재실행 try/catch와 실제 파일 교체를 재현한다.
+        // 롤백 실패 분기만 격리한다. ready 이후 실제 embedded helper는 아래 테스트에서 검증한다.
         File.WriteAllText(Path.Combine(stage, "InstallUpdate.ps1"), RollbackFailureHarness(), new UTF8Encoding(true));
         CreateJob(stage, target);
-        // ready는 설치 완료가 아니라 앱 종료를 허용하는 준비 신호다.
         File.WriteAllText(Path.Combine(stage, "ready"), "ready");
 
         var result = RunPowerShell(stage);
         Check(result.ExitCode == 0, "롤백 실패 설치 helper 종료");
-        Check(File.Exists(Path.Combine(stage, "failure")) && File.ReadAllText(Path.Combine(stage, "failure")).Contains("기존 버전 복구 실패: replace destination", StringComparison.Ordinal), "롤백 실패 원인 격리 검증");
+        var failure = File.ReadAllText(Path.Combine(stage, "failure"));
+        Check(failure.Contains("기존 버전 복구 실패: replace destination", StringComparison.Ordinal), "롤백 실패 원인 격리 검증");
         Check(File.Exists(Path.Combine(stage, "recovery-restarted")), "롤백 실패와 별개로 기존 버전 재실행");
+        Check(Hash(target) == Hash(payload), "롤백 실패 격리 시나리오에서 교체본 유지");
+        Check(Hash(target + ".backup") == original, "롤백 실패 격리 시나리오에서 원본 백업 보존");
     }
 
     private static void VerifyReadyFailureRestarts(string root, string fixture)
     {
         var installed = CreateInstallDirectory(root, fixture);
         var target = Path.Combine(installed, "CodexUsageWidget.exe");
-        var stage = CreateStage();
+        var original = Hash(target);
+        var stage = CreateIsolatedStage(root);
         var payload = Path.Combine(stage, "CodexUsageWidget.exe");
-        File.Copy(target, payload);
-        using (var stream = new FileStream(payload, FileMode.Append)) stream.WriteByte(0);
-        File.WriteAllText(Path.Combine(stage, "InstallUpdate.ps1"), ReadyFailureHarness(), new UTF8Encoding(true));
-        // helper가 현재 테스트 프로세스의 30초 종료 대기에서 실패하도록 job만 격리 디렉터리에 만든다.
-        CreateJob(stage, target, Environment.ProcessId, Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks);
+        File.WriteAllText(payload, "not an executable");
 
         var result = RunInstallerWorker(stage, target);
         Check(result.ExitCode == 0, "ready 이후 C#은 설치 완료를 기다리지 않고 정상 종료");
         Check(result.Error.Length == 0, "ready 직후 C# 반환으로 helper가 부모 종료를 감지");
-        WaitUntil(() => File.Exists(Path.Combine(installed, "restarted")), 15000);
-        Check(File.Exists(Path.Combine(installed, "restarted")), "ready 이후 helper 실패 시 기존 버전 재실행");
+        var failure = WaitForFailure(stage);
+        WaitUntil(() => File.Exists(Path.Combine(installed, "restarted")), 10000);
+        Check(failure.Length > 0 && !File.Exists(Path.Combine(stage, "installed")), "ready 이후 실제 embedded helper의 재실행 실패 주입");
+        Check(File.Exists(Path.Combine(stage, "recovered")), "ready 이후 실제 helper의 롤백 성공·기존 버전 재실행");
+        Check(File.Exists(Path.Combine(installed, "restarted")), "롤백된 대상 파일 재실행");
+        Check(Hash(target) == original, "ready 이후 실패 시 대상 파일을 원본으로 복구");
+        Check(Directory.GetFiles(installed, "*.backup-*").Length == 0, "롤백 성공 후 백업 소비");
+        Check(!failure.Contains("기존 버전 복구 실패:", StringComparison.Ordinal)
+            && !failure.Contains("백업 재실행 실패:", StringComparison.Ordinal)
+            && !failure.Contains("기존 버전 재실행 실패:", StringComparison.Ordinal),
+            "롤백 성공 로그에 소모된 백업 재실행 오류 없음");
     }
 
     private static string CreateInstallDirectory(string root, string fixture)
@@ -173,14 +182,14 @@ internal static class UpdateVerification
         return installed;
     }
 
-    private static string CreateStage()
+    private static string CreateIsolatedStage(string root)
     {
-        var stage = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "CodexUsageWidget", "updates", Guid.NewGuid().ToString("N"));
+        var stage = Path.Combine(root, "실제 설치 단계 " + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(stage);
         return stage;
     }
 
-    private static void CreateJob(string stage, string target, int processId = int.MaxValue, long startedTicks = 0)
+    private static void CreateJob(string stage, string target)
     {
         var payload = Path.Combine(stage, "CodexUsageWidget.exe");
         File.WriteAllText(Path.Combine(stage, "job.json"), JsonSerializer.Serialize(new
@@ -188,18 +197,10 @@ internal static class UpdateVerification
             Target = target,
             Source = payload,
             Hash = Hash(payload),
-            ProcessId = processId,
-            StartedTicks = startedTicks
+            ProcessId = int.MaxValue,
+            StartedTicks = 0
         }));
     }
-
-    private static string ReadyFailureHarness() =>
-        "param([Parameter(Mandatory = $true)][string]$JobPath)\n" +
-        "$job = Get-Content -LiteralPath $JobPath -Raw -Encoding UTF8 | ConvertFrom-Json\n" +
-        "$directory = Split-Path -LiteralPath $JobPath\n" +
-        "[IO.File]::WriteAllText((Join-Path $directory 'ready'), 'ready')\n" +
-        "$parent = Get-Process -Id $job.ProcessId -ErrorAction SilentlyContinue\n" +
-        "if ($null -ne $parent -and -not $parent.WaitForExit(30000)) { throw '30초 종료 대기 시간 초과' }\n";
 
     private static string RollbackFailureHarness() =>
         "param([Parameter(Mandatory = $true)][string]$JobPath)\n" +
@@ -230,7 +231,7 @@ internal static class UpdateVerification
         foreach (var arg in new[] { "--update-worker", stage, target }) start.ArgumentList.Add(arg);
         using var worker = Process.Start(start)!;
         var errors = worker.StandardError.ReadToEndAsync();
-        if (!worker.WaitForExit(40000)) { worker.Kill(true); worker.WaitForExit(); }
+        if (!worker.WaitForExit(15000)) { worker.Kill(true); worker.WaitForExit(); }
         return (worker.ExitCode, errors.GetAwaiter().GetResult());
     }
 
@@ -244,8 +245,19 @@ internal static class UpdateVerification
         using var helper = Process.Start(start)!;
         var output = helper.StandardOutput.ReadToEndAsync();
         var error = helper.StandardError.ReadToEndAsync();
-        if (!helper.WaitForExit(40000)) { helper.Kill(true); helper.WaitForExit(); }
-        return (helper.ExitCode, output.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult(), error.WaitAsync(TimeSpan.FromSeconds(2)).GetAwaiter().GetResult());
+        if (!helper.WaitForExit(10000)) { helper.Kill(true); helper.WaitForExit(); }
+        return (helper.ExitCode, output.GetAwaiter().GetResult(), error.GetAwaiter().GetResult());
+    }
+
+    private static string WaitForFailure(string stage)
+    {
+        var path = Path.Combine(stage, "helper-error");
+        WaitUntil(() =>
+        {
+            try { using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.None); return stream.Length > 0; }
+            catch (IOException) { return false; }
+        }, 15000);
+        return File.ReadAllText(path);
     }
 
     private static void VerifyConsent()
