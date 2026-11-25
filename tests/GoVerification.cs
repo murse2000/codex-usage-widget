@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Net;
 using System.Reflection;
+using CodexUsageWidget;
 
 internal static class GoVerification
 {
@@ -66,6 +67,61 @@ internal static class GoVerification
         using (var client = new HttpClient(new StubHandler(HttpStatusCode.OK, "", stalled: true)))
             Check(Read(client, timeout: TimeSpan.FromMilliseconds(150)) is OperationCanceledException,
                 "본문 지연 시 전체 요청 timeout 적용");
+
+        using (var form = (Form)Activator.CreateInstance(FormType, true)!)
+        {
+            FormType.GetField("goAuthFailed", Instance)!.SetValue(form, true);
+            var goType = App.GetType("CodexUsageWidget.GoUsageWindow")!;
+            var resultType = FormType.GetNestedType("FetchResult`1", BindingFlags.NonPublic)!
+                .MakeGenericType(typeof(IReadOnlyList<>).MakeGenericType(goType));
+            var result = Activator.CreateInstance(resultType, BindingFlags.Instance | BindingFlags.NonPublic, null,
+                new object?[] { null, new IOException("network") }, null)!;
+            FormType.GetMethod("ApplyGo", Instance)!.Invoke(form, new object?[]
+            {
+                result, new List<string>(), new List<AlertStateChange>(), new List<UsageHistoryPoint>()
+            });
+            var status = (string)FormType.GetMethod("StatusText", Instance)!.Invoke(form, null)!;
+            Check(!status.Contains("Go 키 인증 실패", StringComparison.Ordinal), "이전 인증 실패가 네트워크 오류 표시를 덮지 않음");
+        }
+
+        using (var form = (Form)Activator.CreateInstance(FormType, true)!)
+        {
+            var handler = new DelayedHandler(Fixture);
+            using var client = new HttpClient(handler);
+            FormType.GetField("goClient", Instance)!.SetValue(form, client);
+            var save = (Task<string?>)FormType.GetMethod("SaveGoKeyAsync", Instance)!.Invoke(form, new object[] { "new-key" })!;
+            Check(handler.Started.IsCompleted, "지연된 키 확인 요청 시작");
+            FormType.GetMethod("ClearGoKey", Instance)!.Invoke(form, null);
+            handler.Release();
+            Wait(() => save.IsCompleted);
+            Check(save.Result is not null, "키 삭제 후 도착한 저장 응답 취소");
+            Check(FormType.GetField("goApiKey", Instance)!.GetValue(form) is null, "취소된 키 저장이 메모리 키를 복원하지 않음");
+        }
+
+        var settingsPath = (string)FormType.GetField("SettingsPath", Instance | BindingFlags.Static)!.GetValue(null)!;
+        if (File.Exists(settingsPath)) File.Delete(settingsPath);
+        if (Directory.Exists(settingsPath)) Directory.Delete(settingsPath, recursive: true);
+        Directory.CreateDirectory(settingsPath);
+        try
+        {
+            using (var form = (Form)Activator.CreateInstance(FormType, true)!)
+            {
+                var settings = FormType.GetField("settings", Instance)!.GetValue(form)!;
+                settings.GetType().GetProperty("ShowCodex")!.SetValue(settings, true);
+                FormType.GetMethod("SetService", Instance)!.Invoke(form, new object?[] { false, null });
+                Check((bool)settings.GetType().GetProperty("ShowCodex")!.GetValue(settings)!, "서비스 표시 저장 실패 시 이전 값 유지");
+                settings.GetType().GetProperty("OpenCodeGoKey")!.SetValue(settings, "encrypted");
+                FormType.GetField("goApiKey", Instance)!.SetValue(form, "old-key");
+                FormType.GetMethod("ClearGoKey", Instance)!.Invoke(form, null);
+                Check(FormType.GetField("goApiKey", Instance)!.GetValue(form) as string == "old-key",
+                    "키 삭제 저장 실패 시 이전 키 유지");
+            }
+        }
+        finally
+        {
+            if (Directory.Exists(settingsPath)) Directory.Delete(settingsPath, recursive: true);
+            File.Delete(settingsPath + ".tmp");
+        }
 
         var secret = App.GetType("CodexUsageWidget.SecretStore")!;
         var protect = secret.GetMethod("Protect", Static)!;
@@ -184,6 +240,26 @@ internal static class GoVerification
     {
         if (!condition) throw new InvalidOperationException(name);
         checks++;
+    }
+
+    private sealed class DelayedHandler : HttpMessageHandler
+    {
+        private readonly string body;
+        private readonly TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource started = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal DelayedHandler(string body) => this.body = body;
+
+        internal Task Started => started.Task;
+
+        internal void Release() => release.TrySetResult();
+
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            started.TrySetResult();
+            await release.Task.WaitAsync(cancellationToken);
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
+        }
     }
 
     private sealed class StubHandler : HttpMessageHandler

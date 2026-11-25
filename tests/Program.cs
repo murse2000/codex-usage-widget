@@ -73,6 +73,16 @@ internal static class Program
             HistoryVerification.Run();
             return;
         }
+        if (args.Contains("--alert-policy"))
+        {
+            AlertPolicyVerification.Run();
+            return;
+        }
+        if (args.Contains("--diagnostics"))
+        {
+            DiagnosticsVerification.Run();
+            return;
+        }
         var settingsPath = (string)FormType.GetField("SettingsPath", Private)!.GetValue(null)!;
         var backup = File.Exists(settingsPath) ? File.ReadAllBytes(settingsPath) : null;
         Directory.CreateDirectory("obj/layout-verification");
@@ -90,6 +100,9 @@ internal static class Program
             }
             Check(!(bool)FormType.GetField("refreshing", Private)!.GetValue(form)!, "초기 조회 종료");
             CheckAppearance(form, settingsPath);
+            CheckDirectDispose();
+            CheckNullSettingsNormalized(settingsPath);
+            CheckCorruptSettingsIsolated(settingsPath);
             CheckBadgeTime();
             CheckHiddenLayout(form);
             CheckShowMessage(form);
@@ -136,6 +149,8 @@ internal static class Program
                 }
                 CheckGoHidden(form);
                 CheckHistoryIntegration(form);
+                CheckAlertPolicyIntegration(form);
+                CheckDiagnosticsIntegration(form);
                 CheckPicker(form, dpi);
             }
         }
@@ -264,6 +279,8 @@ internal static class Program
         Fit(form);
         rows = TaskbarRows(form);
         Check(rows.Count == 2 && Service(rows[0]) == "Codex" && Service(rows[1]) == string.Empty, "Go를 끄면 Codex를 두 줄로 표시");
+        var split = (TaskbarBadge.Row)rows[1];
+        Check(split.Cells[0] is null && split.Cells[1] is not null, "두 번째 줄에서도 주간 열 위치 유지");
         settings.GetType().GetProperty("ShowOpenCodeGo")!.SetValue(settings, true);
         settings.GetType().GetProperty("ShowCodex")!.SetValue(settings, false);
         Fit(form);
@@ -290,6 +307,29 @@ internal static class Program
         Check(stored.Count >= 5, "성공 사용량 히스토리 저장");
         Check(form.ContextMenuStrip!.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == "사용량 기록·그래프"),
             "트레이에 히스토리 진입점 표시");
+    }
+
+    private static void CheckAlertPolicyIntegration(Form form)
+    {
+        var settings = FormType.GetField("settings", Private)!.GetValue(form)!;
+        var policies = settings.GetType().GetProperty("AlertPolicies")!.GetValue(settings)!;
+        var defaultPolicy = (AlertPolicy)policies.GetType().GetMethod("Get", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)!
+            .Invoke(policies, new object[] { "codex:300" })!;
+        Check(defaultPolicy.WarningPercent == 30, "기본 알림 정책은 경고 30%");
+        Check(form.ContextMenuStrip!.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == "알림 정책…"),
+            "트레이에 알림 정책 진입점 표시");
+        FormType.GetMethod("ShowAlertPolicy", Private)!.Invoke(form, null);
+        Check(form.OwnedForms.OfType<AlertPolicyForm>().Any(), "알림 정책 창 열기");
+        foreach (var owned in form.OwnedForms.OfType<AlertPolicyForm>()) owned.Close();
+    }
+
+    private static void CheckDiagnosticsIntegration(Form form)
+    {
+        Check(form.ContextMenuStrip!.Items.OfType<ToolStripMenuItem>().Any(item => item.Text == "성능 진단…"),
+            "트레이에 성능 진단 진입점 표시");
+        FormType.GetMethod("ShowDiagnostics", Private)!.Invoke(form, null);
+        Check(form.OwnedForms.OfType<DiagnosticsForm>().Any(), "성능 진단 창 열기");
+        foreach (var owned in form.OwnedForms.OfType<DiagnosticsForm>()) owned.Close();
     }
 
     private static void CheckPicker(Form owner, int dpi)
@@ -377,6 +417,32 @@ internal static class Program
                 foreach (var font in fonts) font.Dispose();
             }
         }
+    }
+
+    private static void CheckDirectDispose()
+    {
+        var form = (Form)Activator.CreateInstance(FormType, true)!;
+        form.Dispose();
+        Check(!Field<NotifyIcon>(form, "tray").Visible, "직접 Dispose 시 트레이 아이콘 정리");
+    }
+
+    private static void CheckNullSettingsNormalized(string settingsPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);
+        File.WriteAllText(settingsPath, "{\"Alerts\":null,\"AlertPolicies\":null,\"QuietHours\":null,\"TiboAlertKeys\":null}");
+        var settings = FormType.GetMethod("LoadSettings", Private)!.Invoke(null, null)!;
+        foreach (var name in new[] { "Alerts", "AlertPolicies", "QuietHours", "TiboAlertKeys" })
+            Check(settings.GetType().GetProperty(name)!.GetValue(settings) is not null, $"{name} null 기본값 정규화");
+    }
+
+    private static void CheckCorruptSettingsIsolated(string settingsPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(settingsPath)!);
+        File.WriteAllText(settingsPath, "{broken");
+        FormType.GetMethod("LoadSettings", Private)!.Invoke(null, null);
+        var quarantine = Directory.EnumerateFiles(Path.GetDirectoryName(settingsPath)!, "settings.corrupt-*.json").Single();
+        Check(File.ReadAllText(quarantine) == "{broken", "손상된 설정은 원본을 보존하고 격리");
+        Check(!File.Exists(settingsPath), "손상된 설정을 기본값으로 덮어쓰지 않음");
     }
 
     private static void CheckAppearance(Form form, string settingsPath)

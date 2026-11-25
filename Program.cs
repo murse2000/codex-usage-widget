@@ -103,8 +103,10 @@ internal sealed class UsageForm : GlassForm
     private readonly TaskbarBadge taskbarBadge;
     private readonly WidgetSettings settings = LoadSettings();
     private readonly UsageHistoryStore usageHistory = new();
+    private readonly PerformanceDiagnostics diagnostics = new();
     private static readonly string SettingsPath = AppPaths.SettingsPath;
     private string? goApiKey;
+    private long goKeyGeneration;
     private Process? codexProcess;
     private int codexRequestId;
     private IReadOnlyList<GoUsageWindow>? goWindows;
@@ -114,6 +116,8 @@ internal sealed class UsageForm : GlassForm
     private bool goAuthFailed;
     private bool goRateLimited;
     private bool historySaveFailed;
+    private volatile bool closing;
+    private bool resourcesDisposed;
     private bool refreshing;
     private bool checkingTibo;
     private DateTimeOffset nextTiboCheck;
@@ -152,24 +156,6 @@ internal sealed class UsageForm : GlassForm
         Shown += async (_, _) => await RefreshTiboAsync();
         Shown += async (_, _) => await CheckUpdateAsync(false);
         updateTimer.Tick += async (_, _) => await CheckUpdateAsync(false);
-        FormClosed += (_, _) =>
-        {
-            timer.Stop();
-            timer.Dispose();
-            tiboTimer.Stop();
-            tiboTimer.Dispose();
-            tiboClient.Dispose();
-            goClient.Dispose();
-            StopCodex();
-            updateTimer.Stop();
-            updateTimer.Dispose();
-            SystemEvents.DisplaySettingsChanged -= DisplaySettingsChanged;
-            tray.Visible = false;
-            tray.ContextMenuStrip?.Dispose();
-            tray.Dispose();
-            taskbarBadge.Dispose();
-            Icon?.Dispose();
-        };
         timer.Start();
         tiboTimer.Start();
         updateTimer.Start();
@@ -311,34 +297,40 @@ internal sealed class UsageForm : GlassForm
 
     private async Task RefreshUsageAsync()
     {
-        if (refreshing || IsDisposed) return;
+        if (refreshing || IsDisposed || closing) return;
         refreshing = true;
         refreshButton.Enabled = false;
         status.Text = "확인 중…";
+        var refreshWatch = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var codexTask = settings.ShowCodex
                 ? Task.Run(FetchCodex)
                 : Task.FromResult(FetchResult<UsageSnapshot>.Empty);
+            var goGeneration = Interlocked.Read(ref goKeyGeneration);
             var goTask = settings.ShowOpenCodeGo && goApiKey is { } apiKey
                 ? FetchGoAsync(apiKey)
                 : Task.FromResult(FetchResult<IReadOnlyList<GoUsageWindow>>.Empty);
             await Task.WhenAll(codexTask, goTask);
-            if (IsDisposed) return;
+            if (IsDisposed || closing) return;
 
             var alerts = new List<string>();
+            var alertChanges = new List<AlertStateChange>();
             var history = new List<UsageHistoryPoint>();
-            if (settings.ShowCodex) ApplyCodex(codexTask.Result, alerts, history);
-            if (settings.ShowOpenCodeGo) ApplyGo(goTask.Result, alerts, history);
+            if (settings.ShowCodex) ApplyCodex(codexTask.Result, alerts, alertChanges, history);
+            if (settings.ShowOpenCodeGo && goGeneration == Interlocked.Read(ref goKeyGeneration))
+                ApplyGo(goTask.Result, alerts, alertChanges, history);
             RecordUsageHistory(history);
+            RecordDiagnostics(refreshWatch.Elapsed, !settings.ShowCodex || codexTask.Result.Value is not null,
+                !settings.ShowOpenCodeGo || goApiKey is null || goTask.Result.Value is not null);
 
             status.Text = StatusText();
             FitUsageLayout();
             KeepOnScreen(Screen.FromControl(this));
-            var settingsSaved = SavePosition();
+            var settingsSaved = AlertStateTransaction.Apply(settings.Alerts, alertChanges, SavePosition);
             if (alerts.Count > 0) tray.ShowBalloonTip(10000, "사용량 알림", string.Join("\n", alerts), ToolTipIcon.Warning);
             UpdateTrayText();
-            taskbarBadge.Update(TaskbarRows());
+            taskbarBadge.Update(TaskbarRows(), codexStale || goStale);
             if (!settingsSaved)
             {
                 status.Text = StatusText() + " · 설정 저장 실패";
@@ -395,7 +387,8 @@ internal sealed class UsageForm : GlassForm
         catch (Exception error) { return new(default, error); }
     }
 
-    private void ApplyCodex(FetchResult<UsageSnapshot> result, List<string> alerts, List<UsageHistoryPoint> history)
+    private void ApplyCodex(FetchResult<UsageSnapshot> result, List<string> alerts, List<AlertStateChange> alertChanges,
+        List<UsageHistoryPoint> history)
     {
         if (result.Value is { } usage)
         {
@@ -406,7 +399,7 @@ internal sealed class UsageForm : GlassForm
                 var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
                 history.Add(new UsageHistoryPoint(DateTimeOffset.UtcNow.ToUnixTimeSeconds(), "Codex",
                     window.DurationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture), WindowName(window.DurationMinutes), remaining, window.ResetsAt));
-                var threshold = RecordAlert(settings, $"codex:{window.DurationMinutes}", remaining, window.ResetsAt);
+                var threshold = EvaluateAlert(settings, $"codex:{window.DurationMinutes}", remaining, window.ResetsAt, alertChanges);
                 if (threshold > 0) alerts.Add($"{WindowName(window.DurationMinutes)} 잔여량이 {threshold}% 미만입니다. (현재 {remaining}%)");
             }
         }
@@ -417,7 +410,8 @@ internal sealed class UsageForm : GlassForm
         RenderCodex();
     }
 
-    private void ApplyGo(FetchResult<IReadOnlyList<GoUsageWindow>> result, List<string> alerts, List<UsageHistoryPoint> history)
+    private void ApplyGo(FetchResult<IReadOnlyList<GoUsageWindow>> result, List<string> alerts, List<AlertStateChange> alertChanges,
+        List<UsageHistoryPoint> history)
     {
         if (result.Value is { } windows)
         {
@@ -429,7 +423,7 @@ internal sealed class UsageForm : GlassForm
             {
                 var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
                 history.Add(new UsageHistoryPoint(DateTimeOffset.UtcNow.ToUnixTimeSeconds(), "Go", window.Key, window.Label, remaining, window.ResetsAt));
-                var threshold = RecordAlert(settings, $"go:{window.Key}", remaining, window.ResetsAt);
+                var threshold = EvaluateAlert(settings, $"go:{window.Key}", remaining, window.ResetsAt, alertChanges);
                 if (threshold > 0) alerts.Add($"OpenCode Go {window.Label} 잔여량이 {threshold}% 미만입니다. (현재 {remaining}%)");
             }
         }
@@ -443,11 +437,13 @@ internal sealed class UsageForm : GlassForm
         }
         else if (result.Error is OpenCodeGoRateLimitException)
         {
+            goAuthFailed = false;
             goStale = true;
             goRateLimited = true;
         }
         else if (result.Error is not null)
         {
+            goAuthFailed = false;
             goStale = true;
             goRateLimited = false;
         }
@@ -485,6 +481,23 @@ internal sealed class UsageForm : GlassForm
         {
             historySaveFailed = true;
         }
+    }
+
+    private void RecordDiagnostics(TimeSpan elapsed, bool codexOk, bool goOk)
+    {
+        try
+        {
+            int? processId = null;
+            if (codexProcess is { HasExited: false }) processId = codexProcess.Id;
+            diagnostics.RecordRefresh(elapsed, taskbarBadge.LastQueryMilliseconds, processId, codexOk, goOk);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException) { }
+    }
+
+    private void RecordDiagnosticEvent(string kind, string message)
+    {
+        try { diagnostics.RecordEvent(kind, message); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 
     private void RenderCodex()
@@ -587,10 +600,12 @@ internal sealed class UsageForm : GlassForm
         var only = rows[0];
         var cells = only.Cells.Where(cell => cell is not null).Select(cell => cell!).ToList();
         if (cells.Count < 2) return rows;
+        var second = new TaskbarBadge.Cell?[3];
+        for (var index = 1; index < cells.Count && index < second.Length; index++) second[index] = cells[index];
         return new[]
         {
             new TaskbarBadge.Row(only.Service, new TaskbarBadge.Cell?[] { cells[0], null, null }),
-            new TaskbarBadge.Row(string.Empty, cells.Skip(1).Cast<TaskbarBadge.Cell?>().ToArray())
+            new TaskbarBadge.Row(string.Empty, second)
         };
     }
 
@@ -846,7 +861,9 @@ internal sealed class UsageForm : GlassForm
     /// </summary>
     private Process EnsureCodex()
     {
+        if (closing) throw new ObjectDisposedException(nameof(UsageForm));
         if (codexProcess is { HasExited: false } running) return running;
+        var restarting = codexProcess is not null;
         StopCodex();
         var process = new Process
         {
@@ -862,8 +879,15 @@ internal sealed class UsageForm : GlassForm
         process.StartInfo.ArgumentList.Add("app-server");
         process.StartInfo.ArgumentList.Add("--stdio");
         if (!process.Start()) throw new InvalidOperationException();
+        if (closing)
+        {
+            try { process.Kill(true); process.WaitForExit(5000); } catch { }
+            process.Dispose();
+            throw new ObjectDisposedException(nameof(UsageForm));
+        }
         process.StandardInput.AutoFlush = true;
         codexProcess = process;
+        RecordDiagnosticEvent(restarting ? "codex.restart" : "codex.start", $"pid={process.Id}");
         codexRequestId = 0;
         var id = ++codexRequestId;
         Send(process, new { id, method = "initialize", @params = new { clientInfo = new { name = "codex-usage-widget", title = "Codex Usage Widget", version = "1.0" }, capabilities = new { experimentalApi = false } } });
@@ -940,14 +964,16 @@ internal sealed class UsageForm : GlassForm
         ? Color.FromArgb(199, 58, 69)
         : remaining < 30 ? Color.FromArgb(173, 109, 20) : Accent;
 
-    private static int RecordAlert(WidgetSettings settings, string key, int remaining, long resetsAt)
+    private static int EvaluateAlert(WidgetSettings settings, string key, int remaining, long resetsAt,
+        List<AlertStateChange> changes)
     {
-        if (!settings.Alerts.TryGetValue(key, out var state) || state.ResetsAt != resetsAt)
-            settings.Alerts[key] = state = new AlertState { ResetsAt = resetsAt };
-        var level = remaining < 10 ? 2 : remaining < 30 ? 1 : 0;
-        if (level <= state.Level) return 0;
-        state.Level = level;
-        return level == 2 ? 10 : 30;
+        var previous = settings.Alerts.GetValueOrDefault(key);
+        var current = previous ?? new AlertState { ResetsAt = resetsAt };
+        var now = DateTimeOffset.Now;
+        var evaluation = AlertTracker.Evaluate(current, settings.AlertPolicies.Get(key), remaining, resetsAt,
+            now, settings.QuietHours.IsQuiet(now));
+        changes.Add(new AlertStateChange(key, previous, evaluation.State));
+        return evaluation.Threshold;
     }
 
     private void BuildTrayMenu()
@@ -957,6 +983,8 @@ internal sealed class UsageForm : GlassForm
         menu.Items.Add(toggle);
         menu.Items.Add("새로고침", null, async (_, _) => await RefreshUsageAsync());
         menu.Items.Add("사용량 기록·그래프", null, (_, _) => ShowUsageHistory());
+        menu.Items.Add("알림 정책…", null, (_, _) => ShowAlertPolicy());
+        menu.Items.Add("성능 진단…", null, (_, _) => ShowDiagnostics());
         menu.Items.Add("위젯 설정", null, (_, _) => { ShowWidget(); ShowOpacityPicker(); });
         var services = new ToolStripMenuItem("표시 서비스");
         var codexItem = new ToolStripMenuItem("Codex") { CheckOnClick = true, Checked = settings.ShowCodex };
@@ -1091,15 +1119,39 @@ internal sealed class UsageForm : GlassForm
         {
             if (!File.Exists(SettingsPath)) return new();
             var settings = JsonSerializer.Deserialize<WidgetSettings>(File.ReadAllText(SettingsPath)) ?? new();
+            settings.Alerts ??= new();
+            settings.AlertPolicies ??= new();
+            settings.AlertPolicies.Normalize();
+            settings.QuietHours ??= new();
+            settings.QuietHours.Normalize();
+            settings.TiboAlertKeys ??= new();
             // 알림 키에 서비스 접두사를 붙이기 전에 저장된 기록을 옮긴다.
             foreach (var legacy in new[] { "300", "10080" })
-                if (settings.Alerts.Remove(legacy, out var state)) settings.Alerts["codex:" + legacy] = state;
+                if (settings.Alerts.Remove(legacy, out var state) && !settings.Alerts.ContainsKey("codex:" + legacy))
+                    settings.Alerts["codex:" + legacy] = state;
             return settings;
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+        catch (JsonException)
+        {
+            QuarantineCorruptSettings();
+            return new();
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             return new();
         }
+    }
+
+    private static void QuarantineCorruptSettings()
+    {
+        try
+        {
+            var directory = Path.GetDirectoryName(SettingsPath)!;
+            Directory.CreateDirectory(directory);
+            var quarantine = Path.Combine(directory, $"settings.corrupt-{DateTime.UtcNow:yyyyMMddHHmmssfff}.json");
+            File.Move(SettingsPath, quarantine, false);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 
     private sealed class WidgetSettings
@@ -1113,26 +1165,30 @@ internal sealed class UsageForm : GlassForm
         public bool ShowOpenCodeGo { get; set; } = true;
         public string? OpenCodeGoKey { get; set; }
         public Dictionary<string, AlertState> Alerts { get; set; } = new();
+        public AlertPolicySettings AlertPolicies { get; set; } = new();
+        public AlertQuietHours QuietHours { get; set; } = new();
         public bool TiboAlertsEnabled { get; set; } = true;
         public HashSet<string> TiboAlertKeys { get; set; } = new();
         public string? DeclinedUpdateVersion { get; set; }
     }
 
-    private sealed class AlertState
-    {
-        public long ResetsAt { get; set; }
-        public int Level { get; set; }
-    }
-
     private void SetService(bool? codex = null, bool? go = null)
     {
+        var previousCodex = settings.ShowCodex;
+        var previousGo = settings.ShowOpenCodeGo;
         if (codex is { } codexValue) settings.ShowCodex = codexValue;
         if (go is { } goValue) settings.ShowOpenCodeGo = goValue;
-        SavePosition();
+        if (!SavePosition())
+        {
+            settings.ShowCodex = previousCodex;
+            settings.ShowOpenCodeGo = previousGo;
+            status.Text = "설정 저장 실패";
+            return;
+        }
         status.Text = StatusText();
         FitUsageLayout();
         UpdateTrayText();
-        taskbarBadge.Update(TaskbarRows());
+        taskbarBadge.Update(TaskbarRows(), codexStale || goStale);
         if ((codex == true && codexUsage is null) || (go == true && goWindows is null)) _ = RefreshUsageAsync();
     }
 
@@ -1147,10 +1203,11 @@ internal sealed class UsageForm : GlassForm
     private async Task<string?> SaveGoKeyAsync(string value)
     {
         if (value.Length == 0) return "키를 입력하세요.";
+        var generation = Interlocked.Increment(ref goKeyGeneration);
         IReadOnlyList<GoUsageWindow> windows;
         try
         {
-            windows = await OpenCodeGoUsage.ReadAsync(goClient, value);
+            windows = await OpenCodeGoUsage.ReadAsync(goClient, value).ConfigureAwait(true);
         }
         catch (OpenCodeGoAuthException)
         {
@@ -1160,6 +1217,8 @@ internal sealed class UsageForm : GlassForm
         {
             return "확인 실패 · " + error.Message;
         }
+        if (IsDisposed || generation != Interlocked.Read(ref goKeyGeneration))
+            return "키가 변경되어 저장을 취소했습니다.";
 
         var protectedKey = SecretStore.Protect(value);
         if (protectedKey is null) return "키를 안전하게 저장하지 못했습니다.";
@@ -1191,23 +1250,40 @@ internal sealed class UsageForm : GlassForm
         status.Text = StatusText();
         FitUsageLayout();
         UpdateTrayText();
-        taskbarBadge.Update(TaskbarRows());
+        taskbarBadge.Update(TaskbarRows(), codexStale || goStale);
         return null;
     }
 
     private void ClearGoKey()
     {
+        Interlocked.Increment(ref goKeyGeneration);
+        var previousKey = settings.OpenCodeGoKey;
+        var previousApiKey = goApiKey;
+        var previousWindows = goWindows;
+        var previousAuth = goAuthFailed;
+        var previousStale = goStale;
+        var previousRateLimit = goRateLimited;
         settings.OpenCodeGoKey = null;
         goApiKey = null;
         goWindows = null;
         goAuthFailed = false;
         goStale = false;
         goRateLimited = false;
-        SavePosition();
+        if (!SavePosition())
+        {
+            settings.OpenCodeGoKey = previousKey;
+            goApiKey = previousApiKey;
+            goWindows = previousWindows;
+            goAuthFailed = previousAuth;
+            goStale = previousStale;
+            goRateLimited = previousRateLimit;
+            status.Text = "설정 저장 실패";
+            return;
+        }
         status.Text = StatusText();
         FitUsageLayout();
         UpdateTrayText();
-        taskbarBadge.Update(TaskbarRows());
+        taskbarBadge.Update(TaskbarRows(), codexStale || goStale);
     }
 
     private void ShowUsageHistory()
@@ -1218,9 +1294,50 @@ internal sealed class UsageForm : GlassForm
             existing.Activate();
             return;
         }
-        var history = new UsageHistoryForm(usageHistory);
+        var history = new UsageHistoryForm(usageHistory) { TopMost = TopMost };
         history.Show(this);
         history.BringToFront();
+    }
+
+    private void ShowAlertPolicy()
+    {
+        if (OwnedForms.OfType<AlertPolicyForm>().FirstOrDefault(form => !form.IsDisposed) is { } existing)
+        {
+            existing.BringToFront();
+            existing.Activate();
+            return;
+        }
+        var form = new AlertPolicyForm(settings.AlertPolicies, settings.QuietHours, SaveAlertPolicies) { TopMost = TopMost };
+        form.Show(this);
+        form.BringToFront();
+    }
+
+    private void ShowDiagnostics()
+    {
+        if (OwnedForms.OfType<DiagnosticsForm>().FirstOrDefault(form => !form.IsDisposed) is { } existing)
+        {
+            existing.BringToFront();
+            existing.Activate();
+            return;
+        }
+        var form = new DiagnosticsForm(diagnostics) { TopMost = TopMost };
+        form.Show(this);
+        form.BringToFront();
+    }
+
+    private string? SaveAlertPolicies(AlertPolicySettings policies, AlertQuietHours quietHours)
+    {
+        var previousPolicies = settings.AlertPolicies;
+        var previousQuietHours = settings.QuietHours;
+        settings.AlertPolicies = policies;
+        settings.QuietHours = quietHours;
+        if (!SavePosition())
+        {
+            settings.AlertPolicies = previousPolicies;
+            settings.QuietHours = previousQuietHours;
+            return "설정 저장 실패";
+        }
+        return null;
     }
 
     private void ShowOpacityPicker()
@@ -1495,19 +1612,21 @@ internal sealed class UsageForm : GlassForm
 
             saveKey.Click += async (_, _) =>
             {
+                if (IsDisposed) return;
                 saveKey.Enabled = false;
                 keyStatusLabel.Text = "확인 중…";
                 keyStatusLabel.ForeColor = Muted;
                 try
                 {
                     var error = await onSaveKey(keyBox.Text.Trim());
+                    if (IsDisposed) return;
                     if (error is null) keyBox.Clear();
                     keyStatusLabel.Text = error ?? "인증 확인 · 키 저장됨";
                     keyStatusLabel.ForeColor = error is null ? Accent : Color.FromArgb(173, 109, 20);
                 }
                 finally
                 {
-                    saveKey.Enabled = true;
+                    if (!IsDisposed) saveKey.Enabled = true;
                 }
             };
             clearKey.Click += (_, _) =>
@@ -1529,6 +1648,32 @@ internal sealed class UsageForm : GlassForm
             check.Margin = new Padding(0, 0, 0, 4);
             check.Checked = value;
         }
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing && !resourcesDisposed)
+        {
+            resourcesDisposed = true;
+            closing = true;
+            timer.Stop();
+            timer.Dispose();
+            tiboTimer.Stop();
+            tiboTimer.Dispose();
+            tiboClient.Dispose();
+            goClient.Dispose();
+            StopCodex();
+            updateTimer.Stop();
+            updateTimer.Dispose();
+            SystemEvents.DisplaySettingsChanged -= DisplaySettingsChanged;
+            foreach (var owned in OwnedForms.ToArray()) owned.Dispose();
+            tray.Visible = false;
+            tray.ContextMenuStrip?.Dispose();
+            tray.Dispose();
+            taskbarBadge.Dispose();
+            Icon?.Dispose();
+        }
+        base.Dispose(disposing);
     }
 
     protected override void WndProc(ref Message m)
