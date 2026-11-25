@@ -1347,7 +1347,12 @@ internal sealed class UsageForm : GlassForm
             return;
         }
         var picker = new OpacityPicker(Opacity, value => { Opacity = value; SavePosition(); }, IsStartupEnabled(), SetStartupEnabled,
-            TopMost, value => { TopMost = settings.AlwaysOnTop = value; SavePosition(); },
+            TopMost, value =>
+            {
+                TopMost = settings.AlwaysOnTop = value;
+                foreach (var owned in OwnedForms) owned.TopMost = value;
+                SavePosition();
+            },
             settings.ShowCodex, value => SetService(codex: value),
             settings.ShowOpenCodeGo, value => SetService(go: value),
             SaveGoKeyAsync, ClearGoKey, GoKeyStatusText());
