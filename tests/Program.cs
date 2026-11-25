@@ -299,7 +299,7 @@ internal static class Program
         SetState(form, 2, 3);
         var capture = FormType.GetMethod("CaptureHistoryPoints", Private)
             ?? throw new InvalidOperationException("CaptureHistoryPoints not found");
-        var points = ((IEnumerable)capture.Invoke(form, null)!).Cast<UsageHistoryPoint>().ToArray();
+        var points = ((IEnumerable)capture.Invoke(form, new object[] { true, true })!).Cast<UsageHistoryPoint>().ToArray();
         Check(points.Length == 5, "Codex·Go 성공 사용량을 히스토리 포인트로 변환");
         Check(points.All(point => point.Remaining is >= 0 and <= 100), "히스토리 잔여량 범위");
         FormType.GetMethod("RecordUsageHistory", Private)!.Invoke(form, new object[] { points });

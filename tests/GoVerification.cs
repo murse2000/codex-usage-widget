@@ -78,7 +78,7 @@ internal static class GoVerification
                 new object?[] { null, new IOException("network") }, null)!;
             FormType.GetMethod("ApplyGo", Instance)!.Invoke(form, new object?[]
             {
-                result, new List<string>(), new List<AlertStateChange>(), new List<UsageHistoryPoint>()
+                result, new List<string>(), new List<AlertStateChange>()
             });
             var status = (string)FormType.GetMethod("StatusText", Instance)!.Invoke(form, null)!;
             Check(!status.Contains("Go 키 인증 실패", StringComparison.Ordinal), "이전 인증 실패가 네트워크 오류 표시를 덮지 않음");

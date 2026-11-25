@@ -316,13 +316,15 @@ internal sealed class UsageForm : GlassForm
 
             var alerts = new List<string>();
             var alertChanges = new List<AlertStateChange>();
-            var history = new List<UsageHistoryPoint>();
-            if (settings.ShowCodex) ApplyCodex(codexTask.Result, alerts, alertChanges, history);
+            var codexSucceeded = settings.ShowCodex && codexTask.Result.Value is not null;
+            var goSucceeded = settings.ShowOpenCodeGo && goGeneration == Interlocked.Read(ref goKeyGeneration)
+                && goTask.Result.Value is not null;
+            if (settings.ShowCodex) ApplyCodex(codexTask.Result, alerts, alertChanges);
             if (settings.ShowOpenCodeGo && goGeneration == Interlocked.Read(ref goKeyGeneration))
-                ApplyGo(goTask.Result, alerts, alertChanges, history);
-            RecordUsageHistory(history);
-            RecordDiagnostics(refreshWatch.Elapsed, !settings.ShowCodex || codexTask.Result.Value is not null,
-                !settings.ShowOpenCodeGo || goApiKey is null || goTask.Result.Value is not null);
+                ApplyGo(goTask.Result, alerts, alertChanges);
+            RecordUsageHistory(CaptureHistoryPoints(codexSucceeded, goSucceeded));
+            RecordDiagnostics(refreshWatch.Elapsed, !settings.ShowCodex || codexSucceeded,
+                !settings.ShowOpenCodeGo || goApiKey is null || goSucceeded);
 
             status.Text = StatusText();
             FitUsageLayout();
@@ -387,8 +389,7 @@ internal sealed class UsageForm : GlassForm
         catch (Exception error) { return new(default, error); }
     }
 
-    private void ApplyCodex(FetchResult<UsageSnapshot> result, List<string> alerts, List<AlertStateChange> alertChanges,
-        List<UsageHistoryPoint> history)
+    private void ApplyCodex(FetchResult<UsageSnapshot> result, List<string> alerts, List<AlertStateChange> alertChanges)
     {
         if (result.Value is { } usage)
         {
@@ -397,8 +398,6 @@ internal sealed class UsageForm : GlassForm
             foreach (var window in new[] { usage.Primary, usage.Secondary }.OfType<UsageWindow>())
             {
                 var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
-                history.Add(new UsageHistoryPoint(DateTimeOffset.UtcNow.ToUnixTimeSeconds(), "Codex",
-                    window.DurationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture), WindowName(window.DurationMinutes), remaining, window.ResetsAt));
                 var threshold = EvaluateAlert(settings, $"codex:{window.DurationMinutes}", remaining, window.ResetsAt, alertChanges);
                 if (threshold > 0) alerts.Add($"{WindowName(window.DurationMinutes)} 잔여량이 {threshold}% 미만입니다. (현재 {remaining}%)");
             }
@@ -410,8 +409,7 @@ internal sealed class UsageForm : GlassForm
         RenderCodex();
     }
 
-    private void ApplyGo(FetchResult<IReadOnlyList<GoUsageWindow>> result, List<string> alerts, List<AlertStateChange> alertChanges,
-        List<UsageHistoryPoint> history)
+    private void ApplyGo(FetchResult<IReadOnlyList<GoUsageWindow>> result, List<string> alerts, List<AlertStateChange> alertChanges)
     {
         if (result.Value is { } windows)
         {
@@ -422,7 +420,6 @@ internal sealed class UsageForm : GlassForm
             foreach (var window in windows)
             {
                 var remaining = 100 - Math.Clamp(window.UsedPercent, 0, 100);
-                history.Add(new UsageHistoryPoint(DateTimeOffset.UtcNow.ToUnixTimeSeconds(), "Go", window.Key, window.Label, remaining, window.ResetsAt));
                 var threshold = EvaluateAlert(settings, $"go:{window.Key}", remaining, window.ResetsAt, alertChanges);
                 if (threshold > 0) alerts.Add($"OpenCode Go {window.Label} 잔여량이 {threshold}% 미만입니다. (현재 {remaining}%)");
             }
@@ -450,18 +447,18 @@ internal sealed class UsageForm : GlassForm
         RenderGo();
     }
 
-    private IReadOnlyList<UsageHistoryPoint> CaptureHistoryPoints()
+    private IReadOnlyList<UsageHistoryPoint> CaptureHistoryPoints(bool codexSucceeded, bool goSucceeded)
     {
         var points = new List<UsageHistoryPoint>(5);
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-        if (codexUsage is { } codex)
+        if (codexSucceeded && codexUsage is { } codex)
         {
             foreach (var window in new[] { codex.Primary, codex.Secondary }.OfType<UsageWindow>())
                 points.Add(new UsageHistoryPoint(timestamp, "Codex",
                     window.DurationMinutes.ToString(System.Globalization.CultureInfo.InvariantCulture), WindowName(window.DurationMinutes),
                     100 - Math.Clamp(window.UsedPercent, 0, 100), window.ResetsAt));
         }
-        if (goWindows is { } go)
+        if (goSucceeded && goWindows is { } go)
         {
             foreach (var window in go)
                 points.Add(new UsageHistoryPoint(timestamp, "Go", window.Key, window.Label,
@@ -470,11 +467,11 @@ internal sealed class UsageForm : GlassForm
         return points;
     }
 
-    private void RecordUsageHistory(IReadOnlyList<UsageHistoryPoint>? points = null)
+    private void RecordUsageHistory(IReadOnlyList<UsageHistoryPoint> points)
     {
         try
         {
-            usageHistory.Record(points ?? CaptureHistoryPoints());
+            usageHistory.Record(points);
             historySaveFailed = false;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
